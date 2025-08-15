@@ -1,174 +1,203 @@
-/**
- * Oh My Freud! Backend
- * Express + Stripe + Supabase + OpenAI
- */
-require('dotenv').config();
+// server.js — cola TUDO isso
 
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
-const { createClient } = require('@supabase/supabase-js');
-const OpenAI = require('openai');
 
-// ---- ENV ----
+// ====== LÊ AS CHAVES DO RENDER (Environment Variables) ======
 const PORT = process.env.PORT || 3000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // preencha depois de criar o webhook no Stripe
-
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // (não usamos aqui, só no resto do app)
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY; // chave secreta do Stripe (sk_live...)
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // segredo do webhook (whsec_...)
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// ---- CLIENTS ----
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
-const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-  : null;
+// ====== CLIENTES (opcional Supabase) ======
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+  const { createClient } = require('@supabase/supabase-js');
+  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+}
 
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 const app = express();
 
 /**
- * IMPORTANTE: o webhook do Stripe precisa vir ANTES do express.json(),
- * usando express.raw(), senão a verificação de assinatura falha.
+ * ATENÇÃO: o webhook do Stripe PRECISA vir ANTES do express.json()
+ * e usar express.raw(), senão a verificação de assinatura falha.
  */
-app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-    return res.status(200).send('[Webhook desabilitado]');
-  }
-  const sig = req.headers['stripe-signature'];
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error('❌ Assinatura do webhook inválida:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object;
-        const email = session.customer_details?.email || session.customer_email;
-        const currentPeriodEnd = session.expires_at ? new Date(session.expires_at * 1000) : null;
-
-        if (supabase && email) {
-          await supabase.from('subscriptions').insert({
-            email,
-            provider: 'stripe',
-            price_id: STRIPE_PRICE_ID || null,
-            status: 'active',
-            current_period_end: currentPeriodEnd
-          });
-          console.log('✅ Sub criada no Supabase para', email);
-        }
-        break;
-      }
-      case 'customer.subscription.updated':
-      case 'customer.subscription.created':
-      case 'customer.subscription.deleted': {
-        const sub = event.data.object;
-        const status = sub.status;
-        const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
-
-        let email = null;
-        if (sub.customer && stripe) {
-          try {
-            const customer = await stripe.customers.retrieve(sub.customer);
-            email = customer.email || null;
-          } catch {}
-        }
-
-        if (supabase && email) {
-          await supabase.from('subscriptions').upsert({
-            email,
-            provider: 'stripe',
-            price_id: STRIPE_PRICE_ID || null,
-            status,
-            current_period_end: currentPeriodEnd
-          }, { onConflict: 'email' });
-          console.log(`🔁 Sub ${status} atualizada para`, email);
-        }
-        break;
-      }
-      default:
-        // outros eventos podem ser ignorados no MVP
-        break;
+app.post(
+  '/webhooks/stripe',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    // Se não tiver Stripe ou segredo do webhook, só responde OK pra não quebrar
+    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
+      return res.status(200).send('[Webhook desabilitado]');
     }
-    res.json({ received: true });
-  } catch (err) {
-    console.error('Erro no processamento do webhook:', err);
-    res.status(500).send('Webhook handler error');
-  }
-});
 
-// Middlewares comuns (depois do webhook):
+    // 1) Pega a assinatura que vem no cabeçalho
+    const sig = req.headers['stripe-signature'];
+
+    // 2) Tenta “montar” o evento de forma segura (Stripe valida a assinatura)
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+      console.error('❌ Assinatura inválida do webhook:', err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // 3) Aqui já é seguro. Vamos tratar o “tipo” do evento
+    try {
+      const eventType = event.type;         // ex: 'checkout.session.completed'
+      const data = event.data.object;       // conteúdo principal (ex: sessão, assinatura, etc.)
+
+      console.log('📨 Recebi evento Stripe:', eventType);
+
+      // (Opcional) evitar processar o MESMO evento 2x (Stripe pode reenviar):
+      if (await foiProcessado(event.id)) {
+        console.log('🔁 Evento já processado:', event.id);
+        return res.status(200).send('[ok duplicado]');
+      }
+
+      // “Menu de ações” por tipo de evento:
+      switch (eventType) {
+        case 'checkout.session.completed': {
+          // quando o checkout termina (em assinatura: mode === 'subscription')
+          const { id: sessionId, customer, customer_email, subscription, mode } = data;
+          console.log('✅ checkout.session.completed:', { sessionId, mode, customer, subscription });
+
+          if (mode === 'subscription' && subscription) {
+            await sincronizarAssinatura(subscription, customer, customer_email);
+          }
+          break;
+        }
+
+        case 'customer.subscription.created':
+        case 'customer.subscription.updated':
+        case 'customer.subscription.deleted': {
+          // o objeto já é a assinatura completa
+          await aplicarMudancaAssinatura(data);
+          break;
+        }
+
+        case 'invoice.payment_succeeded': {
+          console.log('💸 invoice.payment_succeeded:', { invoice: data.id, amount: data.amount_paid });
+          await registrarFatura(data, true);
+          break;
+        }
+
+        case 'invoice.payment_failed': {
+          console.log('⚠️ invoice.payment_failed:', { invoice: data.id, amount: data.amount_due });
+          await registrarFatura(data, false);
+          break;
+        }
+
+        default:
+          console.log('ℹ️ Evento não tratado especificamente:', eventType);
+      }
+
+      // marca como processado (idempotência simples)
+      await marcarProcessado(event.id, eventType);
+
+      // MUITO IMPORTANTE: sempre responder 200 se deu tudo certo,
+      // senão o Stripe fica re-tentando e aparece 404/400 no dashboard.
+      return res.status(200).send('[ok]');
+    } catch (err) {
+      console.error('❌ Erro interno tratando webhook:', err);
+      return res.status(500).send('Erro interno');
+    }
+  }
+);
+
+// ====== AQUI, DEPOIS DO WEBHOOK, ENTRAM OS MIDDLEWARES NORMAIS ======
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Health check (teste rápido)
+// Rota de saúde (teste rápido)
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
     hasStripe: !!stripe,
-    hasOpenAI: !!openai,
+    hasOpenAI: !!OPENAI_API_KEY,
     hasSupabase: !!supabase,
     now: new Date().toISOString()
   });
 });
 
-// Criar sessão de checkout de assinatura (Stripe)
-app.post('/api/create-checkout-session', async (req, res) => {
-  try {
-    if (!stripe) return res.status(400).json({ error: 'Stripe não configurado' });
-    if (!STRIPE_PRICE_ID) return res.status(400).json({ error: 'STRIPE_PRICE_ID ausente' });
-
-    const { successUrl, cancelUrl, email } = req.body || {};
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
-      success_url: successUrl || 'https://example.com/success',
-      cancel_url: cancelUrl || 'https://example.com/cancel',
-      allow_promotion_codes: true,
-      customer_email: email || undefined
-    });
-    res.json({ url: session.url });
-  } catch (err) {
-    console.error('Erro ao criar sessão de checkout:', err);
-    res.status(500).json({ error: 'Falha ao criar sessão de checkout' });
-  }
+// (exemplo) rota raiz só pra não dar “Cannot GET /”
+app.get('/', (req, res) => {
+  res.type('text').send('Backend Oh My Freud rodando ✅');
 });
 
-// Interpretação de sonhos (OpenAI)
-app.post('/api/interpret-dream', async (req, res) => {
-  try {
-    if (!openai) return res.status(400).json({ error: 'OpenAI não configurado' });
-    const { text } = req.body || {};
-    if (!text) return res.status(400).json({ error: 'Faltou o campo \"text\"' });
-
-    const systemPrompt = `Você é um psicanalista inspirado na linguagem de Freud. 
-Explique SEPARADO: (1) símbolos/associações possíveis, (2) hipóteses de desejo/angústia, (3) sugestões de reflexão.
-Seja cuidadoso e claro, sem patologizar. Lembre que isto é entretenimento e não substitui terapia.`;
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Meu sonho: ${text}` }
-      ],
-      temperature: 0.7
-    });
-
-    const answer = completion.choices?.[0]?.message?.content || 'Não consegui gerar interpretação.';
-    res.json({ interpretation: answer });
-  } catch (err) {
-    console.error('Erro OpenAI:', err);
-    res.status(500).json({ error: 'Falha ao interpretar sonho' });
-  }
-});
-
+// Sobe o servidor
 app.listen(PORT, () => {
   console.log(`Oh My Freud backend escutando na porta ${PORT}`);
 });
+
+
+// ------------- “HELPERS” SIMPLES (Supabase) -------------
+// Se você ainda não tem tabelas, eles só fazem console.log.
+// Depois a gente troca por INSERT/UPDATE de verdade.
+
+async function foiProcessado(eventId) {
+  // Se não quiser usar Supabase agora, sempre retorna false
+  if (!supabase) return false;
+
+  const { data, error } = await supabase
+    .from('webhook_events')
+    .select('id')
+    .eq('id', eventId)
+    .maybeSingle();
+
+  if (error) {
+    console.log('(!) Erro consultando webhook_events:', error);
+    return false;
+  }
+  return !!data;
+}
+
+async function marcarProcessado(eventId, type) {
+  if (!supabase) {
+    console.log('ℹ️ (sem supabase) marcaria processado:', eventId, type);
+    return;
+  }
+  const { error } = await supabase
+    .from('webhook_events')
+    .insert({ id: eventId, type, processed_at: new Date().toISOString() });
+
+  if (error) console.log('(!) Erro inserindo webhook_events:', error);
+}
+
+async function sincronizarAssinatura(subscriptionId, customerId, email) {
+  console.log('↔️ Sincronizar assinatura', { subscriptionId, customerId, email });
+
+  // Aqui daria para puxar do Stripe: const sub = await stripe.subscriptions.retrieve(subscriptionId)
+  // e salvar/atualizar na sua tabela "subscriptions".
+}
+
+async function aplicarMudancaAssinatura(sub) {
+  console.log('🔄 Mudança de assinatura:', {
+    id: sub.id,
+    status: sub.status,
+    customer: sub.customer,
+    price: sub.items?.data?.[0]?.price?.id
+  });
+
+  // Aqui você atualizaria a linha na tabela "subscriptions".
+}
+
+async function registrarFatura(inv, ok) {
+  console.log(ok ? '💚 Pagamento OK' : '💔 Pagamento FALHOU', {
+    invoice: inv.id,
+    customer: inv.customer,
+    amount: inv.amount_paid ?? inv.amount_due,
+    currency: inv.currency
+  });
+
+  // Aqui você gravaria/atualizaria a tabela "payments".
+}
+
+
+
