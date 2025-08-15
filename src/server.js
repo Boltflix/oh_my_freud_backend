@@ -28,7 +28,7 @@ const app = express();
  * e usar express.raw(), senão a verificação de assinatura falha.
  */
 app.post(
-  '/webhooks/stripe',
+  ['/webhooks/stripe', '/api/stripe-webhook'],
   express.raw({ type: 'application/json' }),
   async (req, res) => {
     // Se não tiver Stripe ou segredo do webhook, só responde OK pra não quebrar
