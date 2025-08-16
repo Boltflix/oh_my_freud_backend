@@ -1,203 +1,231 @@
-// server.js — cola TUDO isso
+// src/server.js — Backend Oh My Freud (CommonJS)
+// Variáveis no Render (Environment):
+// OPENAI_API_KEY, STRIPE_SECRET_KEY, STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL
+// CHECKOUT_SUCCESS_URL (opcional), CHECKOUT_CANCEL_URL (opcional)
 
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const Stripe = require('stripe');
+const express = require("express");
+const cors = require("cors");
+const Stripe = require("stripe");
+const OpenAI = require("openai");
+const { randomUUID } = require("crypto");
 
-// ====== LÊ AS CHAVES DO RENDER (Environment Variables) ======
+const app = express();
 const PORT = process.env.PORT || 3000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // (não usamos aqui, só no resto do app)
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY; // chave secreta do Stripe (sk_live...)
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // segredo do webhook (whsec_...)
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// ====== CLIENTES (opcional Supabase) ======
-let supabase = null;
-if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
-  const { createClient } = require('@supabase/supabase-js');
-  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// ===== Middlewares =====
+app.use(
+  cors({
+    origin: ["https://ohmyfreud.site", "https://www.ohmyfreud.site"],
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// ===== Health =====
+app.get(["/api/health", "/health"], (req, res) => {
+  res.json({
+    ok: true,
+    hasStripe: !!process.env.STRIPE_SECRET_KEY,
+    hasOpenAI: !!process.env.OPENAI_API_KEY,
+    now: new Date().toISOString(),
+  });
+});
+
+// ===== OpenAI =====
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+async function interpretarComOpenAI(payload) {
+  const {
+    title = "",
+    description = "",
+    dream_date = "",
+    mood = "",
+    sleep_quality = "",
+    is_recurring = false,
+  } = payload || {};
+
+  const systemPrompt = `
+Você é Sigmund Freud. Interprete sonhos em português com base na psicanálise (conteúdo manifesto/latente, condensação, deslocamento, simbolização), em tom humano e cuidadoso. Evite generalidades. Responda EM JSON válido:
+{
+  "resumo":"2-3 parágrafos conectados ao sonho",
+  "analise":"explicação psicanalítica",
+  "simbolos":["símbolo: significado", "..."],
+  "temas":["tema1","tema2"],
+  "perguntas":["pergunta 1","pergunta 2"]
+}
+`.trim();
+
+  const userPrompt = `
+Título: ${title}
+Data: ${dream_date}
+Humor: ${mood}
+Sono: ${sleep_quality}
+Recorrente: ${is_recurring ? "sim" : "não"}
+
+Descrição:
+${description}
+`.trim();
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.4,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    response_format: { type: "json_object" },
+  });
+
+  const text = resp?.choices?.[0]?.message?.content || "";
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = {
+      resumo: text || "Sem conteúdo",
+      analise: "",
+      simbolos: [],
+      temas: [],
+      perguntas: [],
+    };
+  }
+  parsed.resumo ||= "";
+  parsed.analise ||= "";
+  parsed.simbolos ||= [];
+  parsed.temas ||= [];
+  parsed.perguntas ||= [];
+  return parsed;
 }
 
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
-const app = express();
+// ===== Rotas de Interpretação =====
+async function criarSonhoHandler(req, res) {
+  try {
+    const payload = req.body || {};
+    if (!payload.description || payload.description.trim().length < 5) {
+      return res.status(400).json({ error: "Descrição do sonho é obrigatória" });
+    }
+    const result = await interpretarComOpenAI(payload);
+    return res.json({ id: randomUUID(), result });
+  } catch (e) {
+    console.error("Erro ao interpretar sonho:", e);
+    res.status(500).json({ error: "Erro ao interpretar sonho" });
+  }
+}
+["/api/dreams", "/dreams", "/api/interpret", "/interpret"].forEach((p) =>
+  app.post(p, criarSonhoHandler)
+);
 
-/**
- * ATENÇÃO: o webhook do Stripe PRECISA vir ANTES do express.json()
- * e usar express.raw(), senão a verificação de assinatura falha.
- */
+async function reinterpretarHandler(req, res) {
+  try {
+    const base = req.body || {};
+    const result = await interpretarComOpenAI(base);
+    return res.json({ id: req.params.id || null, result });
+  } catch (e) {
+    console.error("Erro ao reinterpretar:", e);
+    res.status(500).json({ error: "Erro ao reinterpretar" });
+  }
+}
+[
+  "/api/dreams/:id/reinterpret",
+  "/dreams/:id/reinterpret",
+  "/api/reinterpret/:id",
+  "/reinterpret/:id",
+].forEach((p) => app.post(p, reinterpretarHandler));
+
+// ===== Debug rápido =====
+app.post("/debug/echo", (req, res) => res.json({ ok: true, received: req.body }));
+app.get("/debug/openai", async (req, res) => {
+  try {
+    const result = await interpretarComOpenAI({
+      title: "Casa antiga com portas",
+      description:
+        "Andava por uma casa antiga com muitas portas. Algumas não abriam. No quintal havia um poço.",
+      dream_date: new Date().toISOString().slice(0, 10),
+      mood: "ansioso",
+      sleep_quality: "leve",
+      is_recurring: false,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// ===== Stripe =====
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
+  apiVersion: "2024-06-20",
+});
+
 app.post(
-  ['/webhooks/stripe', '/api/stripe-webhook'],
-  express.raw({ type: 'application/json' }),
+  ["/api/premium/checkout", "/premium/checkout", "/api/stripe/checkout"],
   async (req, res) => {
-    // Se não tiver Stripe ou segredo do webhook, só responde OK pra não quebrar
-    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-      return res.status(200).send('[Webhook desabilitado]');
-    }
-
-    // 1) Pega a assinatura que vem no cabeçalho
-    const sig = req.headers['stripe-signature'];
-
-    // 2) Tenta “montar” o evento de forma segura (Stripe valida a assinatura)
-    let event;
     try {
-      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-    } catch (err) {
-      console.error('❌ Assinatura inválida do webhook:', err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
+      const plan = String(req.body?.plan || "monthly").toLowerCase();
+      const price =
+        plan === "annual"
+          ? process.env.STRIPE_PRICE_ANNUAL
+          : process.env.STRIPE_PRICE_MONTHLY;
 
-    // 3) Aqui já é seguro. Vamos tratar o “tipo” do evento
-    try {
-      const eventType = event.type;         // ex: 'checkout.session.completed'
-      const data = event.data.object;       // conteúdo principal (ex: sessão, assinatura, etc.)
-
-      console.log('📨 Recebi evento Stripe:', eventType);
-
-      // (Opcional) evitar processar o MESMO evento 2x (Stripe pode reenviar):
-      if (await foiProcessado(event.id)) {
-        console.log('🔁 Evento já processado:', event.id);
-        return res.status(200).send('[ok duplicado]');
+      if (!price) {
+        return res
+          .status(400)
+          .json({ error: "PRICE não configurado para o plano " + plan });
       }
 
-      // “Menu de ações” por tipo de evento:
-      switch (eventType) {
-        case 'checkout.session.completed': {
-          // quando o checkout termina (em assinatura: mode === 'subscription')
-          const { id: sessionId, customer, customer_email, subscription, mode } = data;
-          console.log('✅ checkout.session.completed:', { sessionId, mode, customer, subscription });
+      const session = await stripe.checkout.sessions.create({
+        mode: "subscription",
+        line_items: [{ price, quantity: 1 }],
+        success_url:
+          process.env.CHECKOUT_SUCCESS_URL ||
+          "https://ohmyfreud.site/premium/success",
+        cancel_url:
+          process.env.CHECKOUT_CANCEL_URL ||
+          "https://ohmyfreud.site/premium",
+      });
 
-          if (mode === 'subscription' && subscription) {
-            await sincronizarAssinatura(subscription, customer, customer_email);
-          }
-          break;
-        }
-
-        case 'customer.subscription.created':
-        case 'customer.subscription.updated':
-        case 'customer.subscription.deleted': {
-          // o objeto já é a assinatura completa
-          await aplicarMudancaAssinatura(data);
-          break;
-        }
-
-        case 'invoice.payment_succeeded': {
-          console.log('💸 invoice.payment_succeeded:', { invoice: data.id, amount: data.amount_paid });
-          await registrarFatura(data, true);
-          break;
-        }
-
-        case 'invoice.payment_failed': {
-          console.log('⚠️ invoice.payment_failed:', { invoice: data.id, amount: data.amount_due });
-          await registrarFatura(data, false);
-          break;
-        }
-
-        default:
-          console.log('ℹ️ Evento não tratado especificamente:', eventType);
-      }
-
-      // marca como processado (idempotência simples)
-      await marcarProcessado(event.id, eventType);
-
-      // MUITO IMPORTANTE: sempre responder 200 se deu tudo certo,
-      // senão o Stripe fica re-tentando e aparece 404/400 no dashboard.
-      return res.status(200).send('[ok]');
-    } catch (err) {
-      console.error('❌ Erro interno tratando webhook:', err);
-      return res.status(500).send('Erro interno');
+      res.json({ url: session.url });
+    } catch (e) {
+      console.error("Erro no checkout:", e);
+      res.status(500).json({ error: "Erro ao criar checkout" });
     }
   }
 );
 
-// ====== AQUI, DEPOIS DO WEBHOOK, ENTRAM OS MIDDLEWARES NORMAIS ======
-app.use(cors({ origin: '*' }));
-app.use(express.json());
+// GET de teste (abre checkout direto)
+app.get("/test/checkout", async (req, res) => {
+  try {
+    const plan = String(req.query.plan || "monthly").toLowerCase();
+    const price =
+      plan === "annual"
+        ? process.env.STRIPE_PRICE_ANNUAL
+        : process.env.STRIPE_PRICE_MONTHLY;
 
-// Rota de saúde (teste rápido)
-app.get('/api/health', (req, res) => {
-  res.json({
-    ok: true,
-    hasStripe: !!stripe,
-    hasOpenAI: !!OPENAI_API_KEY,
-    hasSupabase: !!supabase,
-    now: new Date().toISOString()
-  });
+    if (!price) return res.status(400).send("PRICE ausente para " + plan);
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      line_items: [{ price, quantity: 1 }],
+      success_url:
+        process.env.CHECKOUT_SUCCESS_URL ||
+        "https://ohmyfreud.site/premium/success",
+      cancel_url:
+        process.env.CHECKOUT_CANCEL_URL ||
+        "https://ohmyfreud.site/premium",
+    });
+
+    res.redirect(302, session.url);
+  } catch (e) {
+    console.error("[Stripe][test/checkout] erro:", e);
+    res.status(500).send("Erro ao criar checkout: " + (e?.message || e));
+  }
 });
 
-// (exemplo) rota raiz só pra não dar “Cannot GET /”
-app.get('/', (req, res) => {
-  res.type('text').send('Backend Oh My Freud rodando ✅');
-});
-
-// Sobe o servidor
+// ===== Start =====
 app.listen(PORT, () => {
   console.log(`Oh My Freud backend escutando na porta ${PORT}`);
 });
 
-
-// ------------- “HELPERS” SIMPLES (Supabase) -------------
-// Se você ainda não tem tabelas, eles só fazem console.log.
-// Depois a gente troca por INSERT/UPDATE de verdade.
-
-async function foiProcessado(eventId) {
-  // Se não quiser usar Supabase agora, sempre retorna false
-  if (!supabase) return false;
-
-  const { data, error } = await supabase
-    .from('webhook_events')
-    .select('id')
-    .eq('id', eventId)
-    .maybeSingle();
-
-  if (error) {
-    console.log('(!) Erro consultando webhook_events:', error);
-    return false;
-  }
-  return !!data;
-}
-
-async function marcarProcessado(eventId, type) {
-  if (!supabase) {
-    console.log('ℹ️ (sem supabase) marcaria processado:', eventId, type);
-    return;
-  }
-  const { error } = await supabase
-    .from('webhook_events')
-    .insert({ id: eventId, type, processed_at: new Date().toISOString() });
-
-  if (error) console.log('(!) Erro inserindo webhook_events:', error);
-}
-
-async function sincronizarAssinatura(subscriptionId, customerId, email) {
-  console.log('↔️ Sincronizar assinatura', { subscriptionId, customerId, email });
-
-  // Aqui daria para puxar do Stripe: const sub = await stripe.subscriptions.retrieve(subscriptionId)
-  // e salvar/atualizar na sua tabela "subscriptions".
-}
-
-async function aplicarMudancaAssinatura(sub) {
-  console.log('🔄 Mudança de assinatura:', {
-    id: sub.id,
-    status: sub.status,
-    customer: sub.customer,
-    price: sub.items?.data?.[0]?.price?.id
-  });
-
-  // Aqui você atualizaria a linha na tabela "subscriptions".
-}
-
-async function registrarFatura(inv, ok) {
-  console.log(ok ? '💚 Pagamento OK' : '💔 Pagamento FALHOU', {
-    invoice: inv.id,
-    customer: inv.customer,
-    amount: inv.amount_paid ?? inv.amount_due,
-    currency: inv.currency
-  });
-
-  // Aqui você gravaria/atualizaria a tabela "payments".
-}
 
 
 
