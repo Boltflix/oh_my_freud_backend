@@ -1,21 +1,23 @@
 // src/server.js — Backend Oh My Freud (CommonJS)
-// Variáveis no Render (Environment):
-// OPENAI_API_KEY, STRIPE_SECRET_KEY, STRIPE_PRICE_MONTHLY, STRIPE_PRICE_ANNUAL
-// CHECKOUT_SUCCESS_URL (opcional), CHECKOUT_CANCEL_URL (opcional)
 
 const express = require("express");
 const cors = require("cors");
-const Stripe = require("stripe");
 const OpenAI = require("openai");
 const { randomUUID } = require("crypto");
 
+// ===== App & porta =====
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== Middlewares =====
 app.use(
   cors({
-    origin: ["https://ohmyfreud.site", "https://www.ohmyfreud.site"],
+    origin: [
+      "https://ohmyfreud.site",
+      "https://www.ohmyfreud.site",
+      "http://localhost:5173",    // dev
+      "http://127.0.0.1:5173"     // dev
+    ],
     credentials: true,
   })
 );
@@ -28,6 +30,11 @@ app.get(["/api/health", "/health"], (req, res) => {
     ok: true,
     hasStripe: !!process.env.STRIPE_SECRET_KEY,
     hasOpenAI: !!process.env.OPENAI_API_KEY,
+    stripePrices: {
+      monthly: !!process.env.STRIPE_MONTHLY_PRICE_ID || !!process.env.STRIPE_PRICE_MONTHLY,
+      annual:  !!process.env.STRIPE_ANNUAL_PRICE_ID  || !!process.env.STRIPE_PRICE_ANNUAL,
+      legacy:  !!process.env.STRIPE_PRICE_ID
+    },
     now: new Date().toISOString(),
   });
 });
@@ -152,79 +159,19 @@ app.get("/debug/openai", async (req, res) => {
   }
 });
 
-// ===== Stripe =====
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
-  apiVersion: "2024-06-20",
-});
+// ===== Stripe (usa a rota que você criou em src/routes/stripe.js) =====
+const stripeRoutes = require("./routes/stripe");
+app.use("/api/stripe", stripeRoutes);
 
-app.post(
-  ["/api/premium/checkout", "/premium/checkout", "/api/stripe/checkout"],
-  async (req, res) => {
-    try {
-      const plan = String(req.body?.plan || "monthly").toLowerCase();
-      const price =
-        plan === "annual"
-          ? process.env.STRIPE_PRICE_ANNUAL
-          : process.env.STRIPE_PRICE_MONTHLY;
-
-      if (!price) {
-        return res
-          .status(400)
-          .json({ error: "PRICE não configurado para o plano " + plan });
-      }
-
-      const session = await stripe.checkout.sessions.create({
-        mode: "subscription",
-        line_items: [{ price, quantity: 1 }],
-        success_url:
-          process.env.CHECKOUT_SUCCESS_URL ||
-          "https://ohmyfreud.site/premium/success",
-        cancel_url:
-          process.env.CHECKOUT_CANCEL_URL ||
-          "https://ohmyfreud.site/premium",
-      });
-
-      res.json({ url: session.url });
-    } catch (e) {
-      console.error("Erro no checkout:", e);
-      res.status(500).json({ error: "Erro ao criar checkout" });
-    }
-  }
-);
-
-// GET de teste (abre checkout direto)
-app.get("/test/checkout", async (req, res) => {
-  try {
-    const plan = String(req.query.plan || "monthly").toLowerCase();
-    const price =
-      plan === "annual"
-        ? process.env.STRIPE_PRICE_ANNUAL
-        : process.env.STRIPE_PRICE_MONTHLY;
-
-    if (!price) return res.status(400).send("PRICE ausente para " + plan);
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
-      line_items: [{ price, quantity: 1 }],
-      success_url:
-        process.env.CHECKOUT_SUCCESS_URL ||
-        "https://ohmyfreud.site/premium/success",
-      cancel_url:
-        process.env.CHECKOUT_CANCEL_URL ||
-        "https://ohmyfreud.site/premium",
-    });
-
-    res.redirect(302, session.url);
-  } catch (e) {
-    console.error("[Stripe][test/checkout] erro:", e);
-    res.status(500).send("Erro ao criar checkout: " + (e?.message || e));
-  }
-});
+// Aliases de compatibilidade (suas URLs antigas continuam funcionando)
+app.use("/api/premium", stripeRoutes);
+app.use("/premium", stripeRoutes);
 
 // ===== Start =====
 app.listen(PORT, () => {
   console.log(`Oh My Freud backend escutando na porta ${PORT}`);
 });
+
 
 
 
