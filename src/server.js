@@ -21,22 +21,19 @@ app.use(
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     optionsSuccessStatus: 204,
-    credentials: false, // ok para nosso caso
+    credentials: false,
   })
 );
 app.options('*', cors());
 
-/* --------- Stripe webhook precisa de RAW antes do json() --------- */
+/* --------- Webhook Stripe (raw antes do json) --------- */
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   try {
-    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-      return res.status(200).send('ok'); // não bloqueia deploy
-    }
-    // Validação se quiser usar os eventos:
+    if (!stripe || !STRIPE_WEBHOOK_SECRET) return res.status(200).send('ok');
     // const sig = req.headers['stripe-signature'];
     // const event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
     return res.status(200).send('ok');
@@ -46,17 +43,17 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req,
   }
 });
 
-/* ------------- Demais rotas usam JSON ------------- */
+/* --------- Demais rotas: parsers --------- */
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // aceita application/x-www-form-urlencoded
 
-/* ------------- STRIPE (com aliases) ------------- */
+/* --------- Stripe + aliases --------- */
 const stripeRouter = require('./routes/stripe');
 app.use('/api/stripe', stripeRouter);   // canônico
 app.use('/api/premium', stripeRouter);  // alias
 app.use('/premium', stripeRouter);      // alias
 
-/* ------------- Interpret (opcional) ------------- */
-/* Se o arquivo existir, monta; se não existir, ignora sem quebrar */
+/* --------- Interpret (opcional; monta só se existir) --------- */
 try {
   const interpretRouter = require('./routes/interpret');
   app.use('/api/interpret', interpretRouter);
@@ -65,7 +62,7 @@ try {
   console.log('routes/interpret.js ausente — ignorando.');
 }
 
-/* ------------- Health ------------- */
+/* --------- Health --------- */
 app.get('/api/health', (req, res) => {
   const hasStripe = !!STRIPE_SECRET_KEY;
   const hasOpenAI = !!(process.env.OPENAI_API_KEY || process.env.OPENAI_KEY);
@@ -91,9 +88,8 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-/* ------------- Start ------------- */
+/* --------- Start --------- */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('Oh My Freud backend listening on', PORT);
 });
-
