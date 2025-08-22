@@ -1,116 +1,73 @@
-// src/server.js
-const express = require("express");
-const cors = require("cors");
-const Stripe = require("stripe");
+// src/server.js (CommonJS)
+// Endpoints principais:
+//  - GET  /api/health
+//  - POST /api/interpret         (alias: /interpret)
+//  - POST /api/stripe/checkout   (aliases: /api/premium e /premium)  [já existentes]
+//  - POST /api/stripe/webhook    (mantém express.raw)
+//  - POST /api/wellness/sleep-hygiene
+//  - POST /api/wellness/free-association
 
-// -----------------------------
-// ENV / Config
-// -----------------------------
-const PORT = process.env.PORT || 3000;
-const FRONTEND_ORIGIN =
-  process.env.FRONTEND_ORIGIN ||
-  "https://ohmyfreud.site";
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
 
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+const interpretRouter = require('./routes/interpret');
+const { router: stripeRouter, createCheckout } = require('./routes/stripe'); // já existente no seu projeto
+const wellnessRouter = require('./routes/wellness'); // NOVO
 
-const STRIPE_MONTHLY_PRICE_ID =
-  process.env.STRIPE_MONTHLY_PRICE_ID ||
-  process.env.STRIPE_PRICE_MONTHLY ||
-  process.env.STRIPE_PRICE_ID || ""; // compat
-
-const STRIPE_ANNUAL_PRICE_ID =
-  process.env.STRIPE_ANNUAL_PRICE_ID ||
-  process.env.STRIPE_PRICE_ANNUAL ||
-  "";
-
-// Stripe client (opcional)
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
-
-// -----------------------------
-// App
-// -----------------------------
 const app = express();
 
-// ---- Webhook Stripe ANTES do express.json()
-app.post(
-  "/api/stripe/webhook",
-  express.raw({ type: "application/json" }),
-  (req, res) => {
-    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-      return res.status(400).send("stripe_webhook_not_configured");
-    }
-    const sig = req.headers["stripe-signature"];
-    try {
-      const event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        STRIPE_WEBHOOK_SECRET
-      );
-      // TODO: trate eventos se quiser (checkout.session.completed etc.)
-      return res.json({ received: true, type: event.type });
-    } catch (err) {
-      console.error("Webhook error:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-  }
-);
-
-// ---- CORS e JSON
+// --------- CORS ANTES do express.json() ----------
 const allowed = new Set([
-  "https://ohmyfreud.site",
-  "https://www.ohmyfreud.site",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
+  'https://ohmyfreud.site',
+  'https://www.ohmyfreud.site',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
 ]);
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      cb(null, allowed.has(origin));
-    },
-    credentials: false,
-  })
-);
+const corsOptions = {
+  origin: (origin, cb) => (!origin || allowed.has(origin)) ? cb(null, true) : cb(null, false),
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+// --------- Webhook Stripe com raw ----------
+app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
+
+// --------- Demais rotas com JSON ----------
 app.use(express.json());
 
-// ---- Health
-app.get("/api/health", async (_req, res) => {
-  res.json({
-    ok: true,
-    hasStripe: !!STRIPE_SECRET_KEY,
-    keyIsLive: STRIPE_SECRET_KEY.startsWith("sk_live_"),
-    hasOpenAI: !!process.env.OPENAI_API_KEY,
-    stripePrices: {
-      monthly: STRIPE_MONTHLY_PRICE_ID || null,
-      annual: STRIPE_ANNUAL_PRICE_ID || null,
-    },
-    frontendOrigin: FRONTEND_ORIGIN,
-  });
+// Health
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, service: 'oh-my-freud-backend', ts: new Date().toISOString() });
 });
 
-// ---- Rotas
-const stripeRouter = require("./routes/stripe");
-app.use("/api/stripe", stripeRouter);
-app.use("/api/premium", stripeRouter);
-app.use("/premium", stripeRouter); // alias compat
+// Interpret
+app.use('/api/interpret', interpretRouter);
+app.use('/interpret', interpretRouter); // alias
 
-const interpretRouter = require("./routes/interpret");
-app.use("/api/interpret", interpretRouter);
-app.use("/interpret", interpretRouter); // alias compat
+// Stripe (existente)
+app.use('/api/stripe', stripeRouter);
+app.post('/api/premium', (req, res) => createCheckout(req, res)); // alias mantido p/ Stripe
+app.post('/premium', (req, res) => createCheckout(req, res));     // alias mantido p/ Stripe
 
-// Raiz simples
-app.get("/", (_req, res) => res.json({ service: "Oh My Freud backend" }));
+// Wellness/Exercícios (NOVO)
+app.use('/api/wellness', wellnessRouter);
 
-// 404 API
-app.use((req, res, next) => {
-  if (req.path.startsWith("/api")) return res.status(404).json({ error: "not_found" });
-  next();
+// Erro genérico
+app.use((err, req, res, next) => {
+  console.error('[UNHANDLED]', err);
+  res.status(500).json({ error: 'internal_error', detail: err?.message || 'unknown' });
 });
 
-// Start
-app.listen(PORT, () => {
-  console.log("Oh My Freud backend listening on", PORT);
-  console.log("Your service is live 🎉");
-});
+const PORT = process.env.PORT || 3000;
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+}
+
+module.exports = app;
+
+
 
