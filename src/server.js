@@ -5,41 +5,60 @@ const cors = require("cors");
 const OpenAI = require("openai");
 const { randomUUID } = require("crypto");
 
-// ===== App & porta =====
+// =====================================================
+// App
+// =====================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ===== Middlewares =====
+// O Render/Proxy adiciona X-Forwarded-Proto, etc. — garante https nas URLs
+app.set("trust proxy", 1);
+
+// =====================================================
+// Middlewares
+// =====================================================
 app.use(
   cors({
     origin: [
       "https://ohmyfreud.site",
       "https://www.ohmyfreud.site",
-      "http://localhost:5173",    // dev
-      "http://127.0.0.1:5173"     // dev
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
     ],
     credentials: true,
   })
 );
+
+// Atenção: o /api/stripe/webhook (se existir) usa raw no próprio router.
+// Aqui usamos JSON para o restante da API.
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ===== Health =====
-app.get(["/api/health", "/health"], (req, res) => {
+// =====================================================
+// Health
+// =====================================================
+app.get(["/", "/api/health", "/health"], (req, res) => {
   res.json({
     ok: true,
     hasStripe: !!process.env.STRIPE_SECRET_KEY,
     hasOpenAI: !!process.env.OPENAI_API_KEY,
     stripePrices: {
+      // novas variáveis
       monthly: !!process.env.STRIPE_MONTHLY_PRICE_ID || !!process.env.STRIPE_PRICE_MONTHLY,
       annual:  !!process.env.STRIPE_ANNUAL_PRICE_ID  || !!process.env.STRIPE_PRICE_ANNUAL,
-      legacy:  !!process.env.STRIPE_PRICE_ID
+      // legado (um price antigo)
+      legacy:  !!process.env.STRIPE_PRICE_ID,
     },
+    appUrl: process.env.APP_URL || "unset",
+    successUrl: process.env.CHECKOUT_SUCCESS_URL || "unset",
+    cancelUrl: process.env.CHECKOUT_CANCEL_URL || "unset",
     now: new Date().toISOString(),
   });
 });
 
-// ===== OpenAI =====
+// =====================================================
+// OpenAI
+// =====================================================
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 async function interpretarComOpenAI(payload) {
@@ -105,7 +124,9 @@ ${description}
   return parsed;
 }
 
-// ===== Rotas de Interpretação =====
+// =====================================================
+// Rotas: Interpretação de Sonhos
+// =====================================================
 async function criarSonhoHandler(req, res) {
   try {
     const payload = req.body || {};
@@ -115,7 +136,7 @@ async function criarSonhoHandler(req, res) {
     const result = await interpretarComOpenAI(payload);
     return res.json({ id: randomUUID(), result });
   } catch (e) {
-    console.error("Erro ao interpretar sonho:", e);
+    console.error("[Dreams] erro ao interpretar:", e);
     res.status(500).json({ error: "Erro ao interpretar sonho" });
   }
 }
@@ -129,7 +150,7 @@ async function reinterpretarHandler(req, res) {
     const result = await interpretarComOpenAI(base);
     return res.json({ id: req.params.id || null, result });
   } catch (e) {
-    console.error("Erro ao reinterpretar:", e);
+    console.error("[Dreams] erro ao reinterpretar:", e);
     res.status(500).json({ error: "Erro ao reinterpretar" });
   }
 }
@@ -140,7 +161,7 @@ async function reinterpretarHandler(req, res) {
   "/reinterpret/:id",
 ].forEach((p) => app.post(p, reinterpretarHandler));
 
-// ===== Debug rápido =====
+// Debug “rápido”
 app.post("/debug/echo", (req, res) => res.json({ ok: true, received: req.body }));
 app.get("/debug/openai", async (req, res) => {
   try {
@@ -159,20 +180,40 @@ app.get("/debug/openai", async (req, res) => {
   }
 });
 
-// ===== Stripe (usa a rota que você criou em src/routes/stripe.js) =====
+// =====================================================
+// Stripe
+// (usa a rota modular em ./routes/stripe — mantém compatibilidade)
+// =====================================================
 const stripeRoutes = require("./routes/stripe");
 app.use("/api/stripe", stripeRoutes);
 
-// Aliases de compatibilidade (suas URLs antigas continuam funcionando)
+// Aliases/compat
 app.use("/api/premium", stripeRoutes);
 app.use("/premium", stripeRoutes);
 
-// ===== Start =====
+// =====================================================
+// Not Found / Error Handler
+// =====================================================
+app.use((req, res, next) => {
+  res.status(404).json({ error: "Not Found", path: req.originalUrl });
+});
+
+app.use((err, req, res, next) => {
+  console.error("[GLOBAL ERROR]", err);
+  res.status(500).json({ error: "Internal Server Error" });
+});
+
+// Logs globais para pegar qualquer rejeição não tratada
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED REJECTION]", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION]", err);
+});
+
+// =====================================================
+// Start
+// =====================================================
 app.listen(PORT, () => {
   console.log(`Oh My Freud backend escutando na porta ${PORT}`);
 });
-
-
-
-
-
