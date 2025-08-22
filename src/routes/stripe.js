@@ -4,43 +4,29 @@ const Stripe = require('stripe');
 
 const router = express.Router();
 
-/* =========================
-   Config / Env
-   ========================= */
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'https://ohmyfreud.site';
 
-// Aceita vários nomes de env para compatibilidade
 const PRICE_MONTHLY =
   process.env.STRIPE_MONTHLY_PRICE_ID ||
   process.env.STRIPE_PRICE_MONTHLY ||
-  process.env.STRIPE_PRICE_ID || // legacy
-  '';
+  process.env.STRIPE_PRICE_ID || '';
 
 const PRICE_ANNUAL =
   process.env.STRIPE_ANNUAL_PRICE_ID ||
-  process.env.STRIPE_PRICE_ANNUAL ||
-  '';
+  process.env.STRIPE_PRICE_ANNUAL || '';
 
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
-/* =========================
-   Helpers
-   ========================= */
 function priceFor(plan) {
   if (plan === 'monthly') return PRICE_MONTHLY;
   if (plan === 'annual') return PRICE_ANNUAL;
   return null;
 }
 
-/* =========================
-   POST /checkout
-   Body: { plan: "monthly" | "annual" }
-   Res:  { url }
-   ========================= */
 router.post('/checkout', async (req, res) => {
   try {
-    if (!stripe || !STRIPE_SECRET_KEY) {
+    if (!stripe) {
       return res
         .status(500)
         .json({ error: 'stripe_not_configured', detail: 'STRIPE_SECRET_KEY ausente no servidor.' });
@@ -48,9 +34,7 @@ router.post('/checkout', async (req, res) => {
 
     const plan = String(req.body?.plan || '').toLowerCase();
     if (plan !== 'monthly' && plan !== 'annual') {
-      return res
-        .status(400)
-        .json({ error: 'invalid_plan', detail: 'Informe plan = "monthly" | "annual".' });
+      return res.status(400).json({ error: 'invalid_plan', detail: 'Informe plan = "monthly" | "annual".' });
     }
 
     const priceId = priceFor(plan);
@@ -71,32 +55,21 @@ router.post('/checkout', async (req, res) => {
       cancel_url: `${FRONTEND_ORIGIN}/premium?canceled=1`,
       allow_promotion_codes: true,
       billing_address_collection: 'auto',
-      // Você pode passar metadata/client_reference_id se quiser amarrar usuário
-      // client_reference_id: req.user?.id,
-      // metadata: { userId: req.user?.id }
     });
 
     return res.status(200).json({ url: session.url });
   } catch (err) {
     console.error('stripe_checkout_error:', err);
-    return res
-      .status(500)
-      .json({ error: 'stripe_error', detail: err?.message || 'unknown_error' });
+    return res.status(500).json({ error: 'stripe_error', detail: err?.message || 'unknown_error' });
   }
 });
 
-/* =========================
-   GET /config (debug opcional)
-   ========================= */
 router.get('/config', (_req, res) => {
   res.json({
     ok: true,
     liveKey: STRIPE_SECRET_KEY.startsWith('sk_live_') || false,
     frontendOrigin: FRONTEND_ORIGIN,
-    prices: {
-      monthly: Boolean(PRICE_MONTHLY),
-      annual: Boolean(PRICE_ANNUAL),
-    },
+    prices: { monthly: Boolean(PRICE_MONTHLY), annual: Boolean(PRICE_ANNUAL) },
   });
 });
 
