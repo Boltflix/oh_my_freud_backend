@@ -37,11 +37,9 @@ app.post(
   (req, res) => {
     try {
       if (!STRIPE_WEBHOOK_SECRET || !stripe) {
-        // Webhook não configurado — 200 pra não travar deploy
         return res.status(200).send("ok");
       }
       const sig = req.headers["stripe-signature"];
-      // Se for validar:
       // const event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
       return res.status(200).send("ok");
     } catch (e) {
@@ -51,13 +49,13 @@ app.post(
   }
 );
 
-/* ------------- MONTE O ROTEADOR DO STRIPE ANTES DO express.json() ------------- */
+/* 🚨 MONTE O ROTEADOR DO STRIPE ANTES DO express.json() 🚨 */
 const stripeRouter = require("./routes/stripe");
 app.use("/api/stripe", stripeRouter);
 app.use("/api/premium", stripeRouter);
 app.use("/premium", stripeRouter);
 
-/* ------------- Demais rotas usam JSON (se precisarmos no futuro) ------------- */
+/* ------------- Demais rotas usam JSON depois ------------- */
 app.use(express.json());
 
 /* ------------- Health ------------- */
@@ -71,6 +69,7 @@ app.get("/api/health", (req, res) => {
     hasStripe,
     hasOpenAI,
     keyIsLive,
+    stripeFirst: true, // <- indicador de que o stripeRouter está montado antes do json()
     stripePrices: {
       monthly:
         process.env.STRIPE_MONTHLY_PRICE_ID ||
