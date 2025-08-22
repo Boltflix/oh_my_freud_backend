@@ -3,18 +3,19 @@ const express = require("express");
 const router = express.Router();
 const Stripe = require("stripe");
 
-// --- Stripe client (somente se houver chave) ---
+// Stripe client (só se houver chave)
 const SECRET = process.env.STRIPE_SECRET_KEY || "";
 const stripe = SECRET ? new Stripe(SECRET) : null;
 
-// --- Origens front (para URLs de sucesso/cancelamento) ---
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://ohmyfreud.site";
+// Origem do front para success/cancel URLs
+const FRONTEND_ORIGIN =
+  process.env.FRONTEND_ORIGIN || "https://ohmyfreud.site";
 
-// --- IDs de preços (suporta nomes novos e legados) ---
+// IDs de preço (suporta nomes novos e legados)
 const PRICE_MONTHLY =
   process.env.STRIPE_MONTHLY_PRICE_ID ||
   process.env.STRIPE_PRICE_MONTHLY ||
-  process.env.STRIPE_PRICE_ID || // último recurso (um único price antigo)
+  process.env.STRIPE_PRICE_ID ||
   null;
 
 const PRICE_ANNUAL =
@@ -28,7 +29,7 @@ function getPriceFor(plan) {
   return null;
 }
 
-// --- DEBUG seguro (não vaza segredos) ---
+// DEBUG seguro: não vaza secrets
 router.get("/debug", (req, res) => {
   res.json({
     hasStripeKey: Boolean(SECRET && SECRET.startsWith("sk_")),
@@ -39,17 +40,17 @@ router.get("/debug", (req, res) => {
   });
 });
 
-// --- Checkout ---
+// CHECKOUT
 router.post("/checkout", async (req, res) => {
   try {
     const { plan } = req.body || {};
     if (!plan || (plan !== "monthly" && plan !== "annual")) {
-      return res.status(400).json({ error: "invalid_plan", hint: 'body.plan = "monthly" | "annual"' });
+      return res.status(400).json({ error: "invalid_plan", hint: 'plan = "monthly" | "annual"' });
     }
-
     if (!SECRET || !SECRET.startsWith("sk_")) {
       return res.status(500).json({ error: "stripe_key_missing", hint: "Set STRIPE_SECRET_KEY (sk_live_...)" });
     }
+
     const priceId = getPriceFor(plan);
     if (!priceId || !priceId.startsWith("price_")) {
       return res.status(500).json({
@@ -59,15 +60,12 @@ router.post("/checkout", async (req, res) => {
       });
     }
 
-    const successUrl = `${FRONTEND_ORIGIN}/premium/success?session_id={CHECKOUT_SESSION_ID}`;
-    const cancelUrl = `${FRONTEND_ORIGIN}/premium?canceled=1`;
-
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       line_items: [{ price: priceId, quantity: 1 }],
       allow_promotion_codes: true,
-      success_url: successUrl,
-      cancel_url: cancelUrl,
+      success_url: `${FRONTEND_ORIGIN}/premium/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_ORIGIN}/premium?canceled=1`,
     });
 
     return res.json({ url: session.url });
@@ -79,4 +77,3 @@ router.post("/checkout", async (req, res) => {
 });
 
 module.exports = router;
-
