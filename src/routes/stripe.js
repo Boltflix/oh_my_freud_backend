@@ -9,7 +9,7 @@ const stripe = SECRET ? new Stripe(SECRET) : null;
 
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://ohmyfreud.site";
 
-// --- Helpers para DEBUG de qual env está sendo usado ---
+// util para checar envs na ordem certa (debug)
 function pickFirst(nameList) {
   for (const n of nameList) {
     if (process.env[n]) return { value: process.env[n], source: n };
@@ -22,11 +22,16 @@ const MONTHLY_PICK = pickFirst([
   "STRIPE_PRICE_MONTHLY",
   "STRIPE_PRICE_ID",
 ]);
-const ANNUAL_PICK = pickFirst(["STRIPE_ANNUAL_PRICE_ID", "STRIPE_PRICE_ANNUAL"]);
+
+const ANNUAL_PICK = pickFirst([
+  "STRIPE_ANNUAL_PRICE_ID",
+  "STRIPE_PRICE_ANNUAL",
+]);
 
 const PRICE_MONTHLY = MONTHLY_PICK.value || "";
 const PRICE_ANNUAL = ANNUAL_PICK.value || "";
 
+// ------------------- helpers -------------------
 function getPriceFor(plan) {
   if (!plan) return null;
   const p = String(plan).toLowerCase();
@@ -35,32 +40,58 @@ function getPriceFor(plan) {
   return null;
 }
 
-// Extrai "plan" de query, body objeto, body string (JSON) ou urlencoded
-function extractPlan(req) {
-  if (req.query && req.query.plan) return String(req.query.plan).toLowerCase();
+function extractPlanFromStringBody(str) {
+  if (!str || typeof str !== "string") return null;
 
-  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
-    if (req.body.plan) return String(req.body.plan).toLowerCase();
-  }
-
-  if (typeof req.body === "string" && req.body.length) {
-    // tenta JSON
+  // tenta JSON
+  try {
+    const asJson = JSON.parse(str);
+    if (asJson && asJson.plan) return String(asJson.plan).toLowerCase();
+  } catch (_) {
+    // tenta form urlencoded
     try {
-      const asJson = JSON.parse(req.body);
-      if (asJson && asJson.plan) return String(asJson.plan).toLowerCase();
-    } catch (_) {
-      // tenta form urlencoded
-      try {
-        const sp = new URLSearchParams(req.body);
-        const p = sp.get("plan");
-        if (p) return String(p).toLowerCase();
-      } catch (_) {}
-    }
+      const sp = new URLSearchParams(str);
+      const p = sp.get("plan");
+      if (p) return String(p).toLowerCase();
+    } catch (_) {}
   }
   return null;
 }
 
-// --------- DEBUG: ver envs e price ids lidos pelo processo ---------
+// lê o body cru SEM body-parser
+function readRawBody(req) {
+  return new Promise((resolve) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      raw += chunk;
+    });
+    req.on("end", () => resolve(raw));
+    req.on("error", () => resolve(""));
+  });
+}
+
+async function resolvePlan(req) {
+  // 1) query
+  if (req.query && req.query.plan) {
+    return String(req.query.plan).toLowerCase();
+  }
+
+  // 2) se algum parser anterior já transformou em objeto
+  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
+    if (req.body.plan) return String(req.body.plan).toLowerCase();
+  }
+
+  // 3) ler o corpo cru e tentar JSON ou urlencoded
+  const raw = await readRawBody(req);
+  req._rawBody = raw; // para debug
+  const p = extractPlanFromStringBody(raw);
+  if (p) return p;
+
+  return null;
+}
+
+// ------------------- debug endpoints -------------------
 router.get("/config", (req, res) => {
   res.json({
     ok: true,
@@ -69,7 +100,6 @@ router.get("/config", (req, res) => {
     annual: { id: PRICE_ANNUAL || null, source: ANNUAL_PICK.source },
     frontendOrigin: FRONTEND_ORIGIN,
     node: process.version,
-    // envs originais (para checagem rápida)
     env: {
       STRIPE_MONTHLY_PRICE_ID: process.env.STRIPE_MONTHLY_PRICE_ID || null,
       STRIPE_PRICE_MONTHLY: process.env.STRIPE_PRICE_MONTHLY || null,
@@ -80,40 +110,37 @@ router.get("/config", (req, res) => {
   });
 });
 
-// --------- DEBUG: ecoar como o corpo foi recebido e que plan foi visto ---------
-router.post("/echo", express.text({ type: "*/*" }), (req, res) => {
-  const contentType = req.headers["content-type"] || null;
-  let bodyPreview = req.body;
-  if (typeof bodyPreview === "string" && bodyPreview.length > 500) {
-    bodyPreview = bodyPreview.slice(0, 500) + "...";
-  }
-  const plan = extractPlan(req);
+router.post("/echo", async (req, res) => {
+  const raw = await readRawBody(req);
+  const plan = extractPlanFromStringBody(raw) || (req.query && req.query.plan) || (req.body && req.body.plan) || null;
   res.json({
     ok: true,
-    contentType,
-    bodyType: typeof req.body,
-    bodyPreview,
+    contentType: req.headers["content-type"] || null,
+    rawPreview: typeof raw === "string" ? (raw.length > 500 ? raw.slice(0, 500) + "..." : raw) : null,
     query: req.query || {},
-    plan,
+    plan: plan ? String(plan).toLowerCase() : null,
   });
 });
 
-// --------- CHECKOUT Stripe (aceita JSON, form e query) ---------
-router.post("/checkout", express.text({ type: "*/*" }), async (req, res) => {
+// ------------------- checkout -------------------
+router.post("/checkout", async (req, res) => {
   try {
     if (!stripe || !SECRET) {
       return res.status(500).json({ error: "stripe_not_configured" });
     }
 
-    const plan = extractPlan(req);
+    const plan = await resolvePlan(req);
     const price = getPriceFor(plan);
+
     if (!price) {
       return res.status(400).json({
         error: "invalid_plan",
-        detail:
-          "Use plan=monthly|annual no corpo (JSON/form) ou na query string. Conferir /api/stripe/config e /api/stripe/echo.",
+        detail: "Use plan=monthly|annual no corpo (JSON/form) ou na query string",
         received: {
-          plan,
+          plan: plan || null,
+          rawBodyPreview: typeof req._rawBody === "string"
+            ? (req._rawBody.length > 300 ? req._rawBody.slice(0, 300) + "..." : req._rawBody)
+            : null,
           hasMonthlyPrice: !!PRICE_MONTHLY,
           hasAnnualPrice: !!PRICE_ANNUAL,
         },
@@ -133,9 +160,10 @@ router.post("/checkout", express.text({ type: "*/*" }), async (req, res) => {
     return res.json({ url: session.url });
   } catch (err) {
     console.error("checkout_error:", err);
-    return res
-      .status(500)
-      .json({ error: "checkout_failed", detail: String(err?.message || err) });
+    return res.status(500).json({
+      error: "checkout_failed",
+      detail: String(err?.message || err),
+    });
   }
 });
 
