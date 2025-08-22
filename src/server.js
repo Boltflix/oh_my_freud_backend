@@ -1,92 +1,93 @@
 // src/server.js
-require('dotenv').config();
-
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-
-// Stripe (para webhook inline)
-const Stripe = require('stripe');
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
-
-// Routers
-const stripeRouter = require('./routes/stripe');
+const express = require("express");
+const cors = require("cors");
+const Stripe = require("stripe");
 
 const app = express();
 
-// ====== CORS (ANTES de qualquer parser) ======
+/* ---------------- C O R S ---------------- */
 const allowed = new Set([
-  'https://ohmyfreud.site',
-  'https://www.ohmyfreud.site',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
+  "https://ohmyfreud.site",
+  "https://www.ohmyfreud.site",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
 ]);
 
 app.use(
   cors({
     origin: (origin, cb) => {
       if (!origin || allowed.has(origin)) return cb(null, true);
-      return cb(new Error('Not allowed by CORS'), false);
+      return cb(new Error("Not allowed by CORS"), false);
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
     optionsSuccessStatus: 204,
+    credentials: false,
   })
 );
 
-// Opcional, mas ajuda alguns hosts:
-app.options('*', cors());
+/* --------- Stripe webhook precisa de RAW antes do json() --------- */
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
-// ====== HEALTH ======
-app.get('/api/health', (_req, res) => {
-  res.status(200).json({ ok: true, time: new Date().toISOString() });
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), (req, res) => {
+  try {
+    if (!STRIPE_WEBHOOK_SECRET || !stripe) {
+      // Webhook não configurado — só 200 pra não travar deploy
+      return res.status(200).send("ok");
+    }
+    const sig = req.headers["stripe-signature"];
+    // Caso queira validar/usar o evento:
+    // const event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+    return res.status(200).send("ok");
+  } catch (e) {
+    console.error("webhook_error:", e);
+    return res.status(400).send(`Webhook Error: ${e.message}`);
+  }
 });
 
-// ====== STRIPE WEBHOOK (raw!) ======
-// Mantido exatamente assim: /api/stripe/webhook com express.raw
-if (stripe) {
-  app.post(
-    '/api/stripe/webhook',
-    express.raw({ type: 'application/json' }),
-    (req, res) => {
-      const sig = req.headers['stripe-signature'];
-      const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-      if (!endpointSecret) {
-        // Sem secret configurado, não quebramos deploy.
-        return res.status(200).send('Webhook disabled');
-      }
-
-      let event;
-      try {
-        event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-      } catch (err) {
-        console.error('⚠️  Webhook signature verification failed.', err.message);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-      }
-
-      // Trate os eventos que você precisa. Por ora, só 200.
-      // console.log('🔔  Received event:', event.type);
-      return res.status(200).send('ok');
-    }
-  );
-}
-
-// ====== JSON parser (DEPOIS do webhook) ======
+/* ------------- Demais rotas usam JSON ------------- */
 app.use(express.json());
 
-// ====== ROTAS ======
-app.use('/api/stripe', stripeRouter);
-// Aliases pedidas: /api/premium e /premium apontam para Stripe
-app.use('/api/premium', stripeRouter);
-app.use('/premium', stripeRouter);
+/* ------------- Routers ------------- */
+const stripeRouter = require("./routes/stripe");
+app.use("/api/stripe", stripeRouter);
+app.use("/api/premium", stripeRouter);
+app.use("/premium", stripeRouter);
 
-// (Se quiser manter /interpret no futuro, pode declarar aqui. Front já tem fallback.)
+const interpretRouter = require("./routes/interpret");
+app.use("/api/interpret", interpretRouter);
+app.use("/interpret", interpretRouter);
 
-// ====== SERVIDOR ======
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Oh My Freud backend on port ${PORT}`);
+/* ------------- Health ------------- */
+app.get("/api/health", (req, res) => {
+  const hasStripe = !!STRIPE_SECRET_KEY;
+  const hasOpenAI = !!(process.env.OPENAI_API_KEY || process.env.OPENAI_KEY);
+  const keyIsLive = hasStripe && STRIPE_SECRET_KEY.startsWith("sk_live_");
+
+  res.json({
+    ok: true,
+    hasStripe,
+    hasOpenAI,
+    keyIsLive,
+    stripePrices: {
+      monthly:
+        process.env.STRIPE_MONTHLY_PRICE_ID ||
+        process.env.STRIPE_PRICE_MONTHLY ||
+        process.env.STRIPE_PRICE_ID ||
+        null,
+      annual:
+        process.env.STRIPE_ANNUAL_PRICE_ID ||
+        process.env.STRIPE_PRICE_ANNUAL ||
+        null,
+    },
+    frontendOrigin: process.env.FRONTEND_ORIGIN || "https://ohmyfreud.site",
+  });
 });
 
+/* ------------- Start ------------- */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("Oh My Freud backend listening on", PORT);
+});
