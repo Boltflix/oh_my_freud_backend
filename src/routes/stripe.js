@@ -43,7 +43,7 @@ async function createSession(plan) {
   });
 }
 
-/** JSON: { url } — mantém compatibilidade */
+/** JSON: mantém compatibilidade com o fetch antigo, se existir */
 router.post('/checkout', async (req, res) => {
   try {
     const plan = getPlan(req);
@@ -60,7 +60,7 @@ router.post('/checkout', async (req, res) => {
   }
 });
 
-/** NOVO: Redireciona direto pro Stripe (sem fetch no front) */
+/** NOVO: redireciona direto pro Stripe (sem fetch no front) */
 router.post('/checkout/redirect', async (req, res) => {
   try {
     const plan = getPlan(req);
