@@ -1,6 +1,7 @@
 // src/server.js
 const express = require("express");
 const cors = require("cors");
+const Stripe = require("stripe"); // <-- CORRETO
 
 // ----------------------------------------------------------------------------
 // CORS – libera seus domínios + dev
@@ -16,7 +17,6 @@ const app = express();
 
 // IMPORTANTE: o webhook precisa do corpo RAW, então montamos
 // a rota do webhook ANTES do express.json() geral.
-const Stripe = require("stripe");
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 
@@ -29,7 +29,7 @@ app.post(
       if (!STRIPE_SECRET_KEY || !STRIPE_WEBHOOK_SECRET) {
         return res.status(500).send("Stripe env missing");
       }
-      const stripe = new Stripe(STRIPE_SECRET_KEY);
+      const stripe = new Stripe(STRIPE_SECRET_KEY); // <-- instância correta
       const sig = req.headers["stripe-signature"];
       const event = stripe.webhooks.constructEvent(
         req.body,
@@ -37,10 +37,7 @@ app.post(
         STRIPE_WEBHOOK_SECRET
       );
 
-      // Logs rápidos (adicione a persistência que quiser)
       console.log("[webhook]", event.type);
-
-      // Ex.: pós-checkout
       // if (event.type === "checkout.session.completed") { ... }
 
       return res.json({ received: true });
@@ -85,17 +82,15 @@ app.get("/api/health", (req, res) => {
 
 // ----------------------------------------------------------------------------
 // STRIPE ROUTES (checkout + debug)
-// OBS: como server.js está dentro de src/, o require é ./routes/stripe
+// IMPORTANTE: como server.js está dentro de src/, use ./routes/stripe
 // ----------------------------------------------------------------------------
 const stripeRouter = require("./routes/stripe");
 app.use("/api/stripe", stripeRouter);
-// Aliases compatíveis que você mencionou:
+// Aliases compatíveis:
 app.use("/api/premium", stripeRouter);
 app.use("/premium", stripeRouter);
 
-// ----------------------------------------------------------------------------
 // (mantenha aqui suas outras rotas, ex.: /api/interpret)
-// ----------------------------------------------------------------------------
 
 // START
 const PORT = process.env.PORT || 3000;
