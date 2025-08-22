@@ -1,101 +1,149 @@
 // src/routes/interpret.js
 const express = require("express");
 const router = express.Router();
-const OpenAI = require("openai");
 
-const HAS_OPENAI = !!process.env.OPENAI_API_KEY;
-const openai = HAS_OPENAI ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 
-// normaliza idioma recebido
-function pickLocale(lang) {
-  const v = String(lang || "").toLowerCase();
-  if (v.startsWith("pt")) return "pt-BR";
-  if (v.startsWith("es")) return "es-ES";
-  if (v.startsWith("fr")) return "fr-FR";
+// linguagem -> tag
+function normLang(l) {
+  if (!l) return "pt-BR";
+  const s = String(l).toLowerCase();
+  if (s.startsWith("en")) return "en-US";
+  if (s.startsWith("es")) return "es-ES";
+  if (s.startsWith("fr")) return "fr-FR";
+  if (s.startsWith("pt")) return "pt-BR";
   return "en-US";
 }
 
-// aceita JSON nesta rota
-const jsonParser = express.json();
+async function chatJSON({ title, description, lang }) {
+  const modelCandidates = ["gpt-4o-mini", "gpt-4o-mini-translate", "gpt-4o", "gpt-3.5-turbo"];
+  const system = `You are a psychoanalytic assistant. ALWAYS answer in valid JSON UTF-8 with keys:
+{
+  "summary": "...",
+  "analysis": "...",
+  "symbols": [{"symbol":"...","meaning":"..."}],
+  "themes": ["..."],
+  "associationPrompts": ["..."],
+  "language": "${lang}"
+}`;
 
-router.post(["/api/interpret", "/interpret"], jsonParser, async (req, res) => {
+  const user = `Language: ${lang}
+Title: ${title || ""}
+Description: ${description || ""}
+
+Return ONLY JSON, no extra text.`;
+
+  for (const model of modelCandidates) {
+    try {
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_KEY}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          temperature: 0.7,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error?.message || `openai_${r.status}`);
+      const content = j?.choices?.[0]?.message?.content || "";
+      // tenta extrair JSON
+      const jsonText =
+        content.trim().startsWith("{") ? content :
+        (content.match(/\{[\s\S]*\}$/) || [])[0] || content;
+
+      return JSON.parse(jsonText);
+    } catch (e) {
+      // tenta próximo modelo
+    }
+  }
+  throw new Error("openai_failed_all_models");
+}
+
+function normalize(p, lang) {
+  const summary = p?.resumo ?? p?.summary ?? "";
+  const analysis = p?.analise ?? p?.analysis ?? p?.fullText ?? "";
+  const symbolsRaw = Array.isArray(p?.simbolos ?? p?.symbols) ? p?.simbolos ?? p?.symbols : [];
+  const themes = Array.isArray(p?.temas ?? p?.themes) ? p?.temas ?? p?.themes : [];
+  const prompts = Array.isArray(p?.perguntas ?? p?.associationPrompts ?? p?.questions)
+    ? (p?.perguntas ?? p?.associationPrompts ?? p?.questions)
+    : [];
+
+  const symbols = symbolsRaw.map((s) => {
+    if (typeof s === "string") return { symbol: s, meaning: "" };
+    if (Array.isArray(s)) return { symbol: s[0] || "", meaning: s[1] || "" };
+    return { symbol: s?.symbol || "", meaning: s?.meaning || "" };
+  });
+
+  return {
+    result: {
+      summary,
+      analysis,
+      symbols,
+      themes,
+      associationPrompts: prompts,
+      language: p?.language || lang,
+    },
+  };
+}
+
+// Ping simples
+router.get("/ping", (_req, res) => res.json({ ok: true }));
+
+// POST /api/interpret
+router.post("/", async (req, res) => {
   try {
     const {
       title = "",
       description = "",
-      dream_date = "",
-      mood = "",
-      sleep_quality = "",
-      is_recurring = false,
+      dream_date,
+      mood,
+      sleep_quality,
+      is_recurring,
       lang,
     } = req.body || {};
 
-    if (!title && !description) {
-      return res.status(400).json({ error: "missing_input", message: "Provide title or description." });
+    const locale = normLang(lang);
+
+    // Se não houver chave, devolve um mock útil para QA (não 500)
+    if (!OPENAI_KEY) {
+      return res.json(
+        normalize(
+          {
+            summary:
+              locale.startsWith("pt")
+                ? "Resumo fictício (sem OPENAI_KEY configurada)."
+                : locale.startsWith("es")
+                ? "Resumen ficticio (sin OPENAI_KEY)."
+                : "Mock summary (no OPENAI_KEY).",
+            analysis:
+              (title ? `Title: ${title}\n` : "") +
+              (description ? `Description: ${description}\n\n` : "") +
+              "Sem chave OpenAI — retornando resposta mock para testes.",
+            symbols: ["biblioteca", "mar", "porta"],
+            themes: ["autoconhecimento", "mudança"],
+            associationPrompts: [
+              "O que esse sonho te lembra?",
+              "Que emoções ficaram mais fortes?",
+            ],
+            language: locale,
+          },
+          locale
+        )
+      );
     }
 
-    const locale = pickLocale(lang);
-
-    // Sem OpenAI -> fallback previsível (pelo menos não quebra)
-    if (!HAS_OPENAI) {
-      return res.json({
-        result: {
-          summary: `Prévia (${locale}): resumo breve do sonho.`,
-          analysis: `Prévia (${locale}): análise ilustrativa com base no título "${title}".`,
-          symbols: [],
-          themes: [],
-          questions: [
-            "Qual sensação ficou após acordar?",
-            "Há algum evento recente que possa se relacionar?",
-          ],
-          language: locale,
-        },
-      });
-    }
-
-    const prompt = `
-You are a psychoanalytic assistant. Respond strictly in JSON.
-Language: ${locale}
-
-Dream data:
-- Title: ${title}
-- Date: ${dream_date}
-- Mood(0-5): ${mood}
-- Sleep quality(0-5): ${sleep_quality}
-- Recurring: ${is_recurring}
-- Description: ${description}
-
-Return ONLY a JSON object with keys:
-{
-  "summary": string,
-  "analysis": string,
-  "symbols": array of (string or {"symbol": string, "meaning": string}),
-  "themes": array of string,
-  "questions": array of string
-}
-`;
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      temperature: 0.7,
-      messages: [
-        { role: "system", content: "You are a helpful psychoanalytic assistant." },
-        { role: "user", content: prompt },
-      ],
-    });
-
-    const raw = completion?.choices?.[0]?.message?.content || "{}";
-    let parsed = {};
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      parsed = {};
-    }
-
-    return res.json({ result: { ...parsed, language: locale } });
+    const ai = await chatJSON({ title, description, lang: locale });
+    return res.json(normalize(ai, locale));
   } catch (err) {
-    console.error("interpret error:", err);
-    return res.status(500).json({ error: "interpret_failed", message: String(err.message || err) });
+    console.error("interpret_error:", err);
+    return res.status(500).json({ error: "interpret_failed", detail: String(err.message || err) });
   }
 });
 
