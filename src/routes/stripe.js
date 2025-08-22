@@ -20,7 +20,7 @@ const PRICE_ANNUAL =
   process.env.STRIPE_PRICE_ANNUAL ||
   "";
 
-// resolve price id
+// Mapeia o plan -> price id
 function getPriceFor(plan) {
   if (!plan) return null;
   const p = String(plan).toLowerCase();
@@ -29,23 +29,21 @@ function getPriceFor(plan) {
   return null;
 }
 
-// tenta extrair "plan" do query, do body objeto, de JSON cru ou URL-encoded
+// Extrai "plan" de query, body já parseado, body texto (JSON) ou body urlencoded
 function extractPlan(req) {
-  // 1) query ?plan=monthly
   if (req.query?.plan) return String(req.query.plan).toLowerCase();
 
-  // 2) body já objeto (caso algum json() tenha rodado)
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
     if (req.body.plan) return String(req.body.plan).toLowerCase();
   }
 
-  // 3) body texto cru -> tentar JSON
   if (typeof req.body === "string" && req.body.length) {
+    // tenta JSON
     try {
       const asJson = JSON.parse(req.body);
       if (asJson && asJson.plan) return String(asJson.plan).toLowerCase();
     } catch (_) {
-      // 4) body texto cru -> tentar form urlencoded
+      // tenta form urlencoded
       try {
         const sp = new URLSearchParams(req.body);
         const p = sp.get("plan");
@@ -53,19 +51,13 @@ function extractPlan(req) {
       } catch (_) {}
     }
   }
+
   return null;
 }
 
-/**
- * POST /api/stripe/checkout
- * Aceita:
- *  - JSON: {"plan":"monthly"|"annual"}
- *  - x-www-form-urlencoded: plan=monthly
- *  - Query: ?plan=monthly
- *
- * Usamos express.text({type:'*/*'}) para NÃO deixar o body-parser responder 400 HTML.
- * Fazemos o parse manual acima e sempre respondemos JSON.
- */
+// POST /api/stripe/checkout
+// Usa express.text() para evitar que algum body-parser global gere 400 HTML.
+// Aceita: JSON {"plan":"monthly"|"annual"}, form urlencoded (plan=...), ou query (?plan=...).
 router.post("/checkout", express.text({ type: "*/*" }), async (req, res) => {
   try {
     if (!stripe || !SECRET) {
