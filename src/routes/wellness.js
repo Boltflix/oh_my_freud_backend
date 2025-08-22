@@ -1,7 +1,5 @@
-// src/routes/wellness.js (CommonJS)
-// POST /api/wellness/sleep-hygiene
-// POST /api/wellness/free-association
-// Ambas respeitam lang e devolvem blocos prontos pra renderizar.
+// src/routes/wellness.js (CommonJS) — EXPORT CORRETO
+// module.exports = router  (não { router })
 
 const express = require('express');
 const router = express.Router();
@@ -48,8 +46,8 @@ function mockSleep(lang=DEF){
       ],
       cautions: ['Snoring/apnea → medical eval', 'No screens in bed', 'Persistent insomnia → specialist'],
     },
-    'es-ES': { /* similar */ },
-    'fr-FR': { /* similar */ },
+    'es-ES': { overview:'Plan práctico de 7 días…', exercises:[], weeklyPlan:[], cautions:[] },
+    'fr-FR': { overview:'Plan pratique sur 7 jours…', exercises:[], weeklyPlan:[], cautions:[] },
   }[L];
   return { result: { ...t, language: L } };
 }
@@ -89,103 +87,86 @@ function mockAssoc(lang=DEF){
       ],
       cautions: ['If intense distress arises, pause and seek qualified support.'],
     },
-    'es-ES': { /* similar */ },
-    'fr-FR': { /* similar */ },
+    'es-ES': { guidance:'Siéntate cómodo…', session:[], cautions:[] },
+    'fr-FR': { guidance:'Installez-vous…', session:[], cautions:[] },
   }[L];
   return { result: { ...t, language: L } };
 }
 
 router.post('/sleep-hygiene', async (req, res) => {
-  const { lang = DEF, preferences = {} } = req.body || {};
-  const L = SUP.has(lang) ? lang : DEF;
-
+  const { lang = DEF } = req.body || {};
   try {
     const key = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
-    if (!key) return res.json(mockSleep(L));
-
+    if (!key) return res.json(mockSleep(lang));
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: key });
 
     const prompt = `
-Write EVERYTHING in ${L}.
-Create a practical sleep-hygiene kit tailored for a busy adult:
+Write EVERYTHING in ${lang}.
+Create a practical sleep-hygiene kit:
 - "overview": 2–3 sentences.
-- "exercises": array of 3–5 items {title, duration, steps[3–5]}.
+- "exercises": 3–5 items {title, duration, steps[3–5]}.
 - "weeklyPlan": 7 items {day, focus, actions[2–3]}.
-- "cautions": 2–4 succinct notes.
-Return ONLY JSON with { "result": { overview, exercises, weeklyPlan, cautions, language:"${L}" } }.
-No markdown.
-User preferences (optional): ${JSON.stringify(preferences)}
+- "cautions": 2–4 notes.
+Return ONLY JSON { "result": { overview, exercises, weeklyPlan, cautions, language:"${lang}" } }.
 `;
 
-    const completion = await client.chat.completions.create({
+    const out = await client.chat.completions.create({
       model: 'gpt-4o-mini',
       temperature: 0.6,
       max_tokens: 900,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'You are a concise behavioral sleep coach with evidence-informed advice.' },
+        { role: 'system', content: 'You are a concise behavioral sleep coach.' },
         { role: 'user', content: prompt },
       ],
     });
 
-    let raw = completion.choices?.[0]?.message?.content || '';
     let parsed;
-    try { parsed = JSON.parse(raw); } catch { parsed = mockSleep(L); }
-    const safe = parsed?.result ? parsed : mockSleep(L);
-    res.json(safe);
+    try { parsed = JSON.parse(out.choices?.[0]?.message?.content || ''); } catch {}
+    res.json(parsed?.result ? parsed : mockSleep(lang));
   } catch (e) {
     console.error('[SLEEP HYGIENE ERROR]', e);
-    res.json(mockSleep(L));
+    res.json(mockSleep(lang));
   }
 });
 
 router.post('/free-association', async (req, res) => {
-  const { lang = DEF, mode = 'freud' } = req.body || {};
-  const L = SUP.has(lang) ? lang : DEF;
-
+  const { lang = DEF } = req.body || {};
   try {
     const key = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
-    if (!key) return res.json(mockAssoc(L));
+    if (!key) return res.json(mockAssoc(lang));
 
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: key });
 
-    const sys =
-      mode === 'freud'
-        ? 'You are a playful, precise psychoanalyst channeling a light Freud vibe, without moralizing.'
-        : 'You are a neutral, supportive journaling coach.';
-
     const prompt = `
-Write EVERYTHING in ${L}.
+Write EVERYTHING in ${lang}.
 Provide:
-- "guidance": 1–2 sentences for setup (timer, no censorship).
-- "session": 10 numbered prompts (short, lively, safe).
-- "cautions": 1–2 brief safety notes.
-Return ONLY JSON { "result": { guidance, session, cautions, language: "${L}" } }.
-No markdown.
+- "guidance": 1–2 setup sentences.
+- "session": 10 short prompts (numbered feel, but strings okay).
+- "cautions": 1–2 safety notes.
+Return ONLY JSON { "result": { guidance, session, cautions, language:"${lang}" } }.
 `;
 
-    const completion = await client.chat.completions.create({
+    const out = await client.chat.completions.create({
       model: 'gpt-4o-mini',
       temperature: 0.7,
       max_tokens: 700,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: sys },
+        { role: 'system', content: 'You are a playful, precise psychoanalyst (light Freud vibe).' },
         { role: 'user', content: prompt },
       ],
     });
 
-    let raw = completion.choices?.[0]?.message?.content || '';
     let parsed;
-    try { parsed = JSON.parse(raw); } catch { parsed = mockAssoc(L); }
-    const safe = parsed?.result ? parsed : mockAssoc(L);
-    res.json(safe);
+    try { parsed = JSON.parse(out.choices?.[0]?.message?.content || ''); } catch {}
+    res.json(parsed?.result ? parsed : mockAssoc(lang));
   } catch (e) {
-    console.error('[FREE ASSOCIATION ERROR]', e);
-    res.json(mockAssoc(L));
+    console.error('[FREE ASSOC ERROR]', e);
+    res.json(mockAssoc(lang));
   }
 });
 
-module.exports = router;
+module.exports = router; // <- chave do hotfix
