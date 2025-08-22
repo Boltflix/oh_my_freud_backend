@@ -1,82 +1,103 @@
-// src/server.js
-require('dotenv').config();
-
+// src/routes/stripe.js
 const express = require('express');
-const cors = require('cors');
 const Stripe = require('stripe');
 
-const app = express();
+const router = express.Router();
 
 /* =========================
-   CORS — ANTES de qualquer parser
+   Config / Env
    ========================= */
-const allowed = new Set([
-  'https://ohmyfreud.site',
-  'https://www.ohmyfreud.site',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-]);
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'https://ohmyfreud.site';
 
-app.use(
-  cors({
-    origin: (origin, cb) => (!origin || allowed.has(origin) ? cb(null, true) : cb(new Error('Not allowed by CORS'))),
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    optionsSuccessStatus: 204,
-  })
-);
-app.options('*', cors());
+// Aceita vários nomes de env para compatibilidade
+const PRICE_MONTHLY =
+  process.env.STRIPE_MONTHLY_PRICE_ID ||
+  process.env.STRIPE_PRICE_MONTHLY ||
+  process.env.STRIPE_PRICE_ID || // legacy
+  '';
+
+const PRICE_ANNUAL =
+  process.env.STRIPE_ANNUAL_PRICE_ID ||
+  process.env.STRIPE_PRICE_ANNUAL ||
+  '';
+
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 /* =========================
-   HEALTH
+   Helpers
    ========================= */
-app.get('/api/health', (_req, res) => {
-  res.status(200).json({ ok: true, time: new Date().toISOString() });
-});
+function priceFor(plan) {
+  if (plan === 'monthly') return PRICE_MONTHLY;
+  if (plan === 'annual') return PRICE_ANNUAL;
+  return null;
+}
 
 /* =========================
-   STRIPE WEBHOOK (raw!)
+   POST /checkout
+   Body: { plan: "monthly" | "annual" }
+   Res:  { url }
    ========================= */
-const stripeSecret = process.env.STRIPE_SECRET_KEY || '';
-const stripe = stripeSecret ? new Stripe(stripeSecret) : null;
-
-// manter exatamente assim: /api/stripe/webhook com express.raw
-app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
-    // não quebra deploy se não configurado
-    return res.status(200).send('Webhook disabled');
-  }
+router.post('/checkout', async (req, res) => {
   try {
-    const event = stripe.webhooks.constructEvent(
-      req.body,
-      req.headers['stripe-signature'],
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-    // trate eventos se quiser (invoice.paid, checkout.session.completed etc.)
-    return res.status(200).send('ok');
+    if (!stripe || !STRIPE_SECRET_KEY) {
+      return res
+        .status(500)
+        .json({ error: 'stripe_not_configured', detail: 'STRIPE_SECRET_KEY ausente no servidor.' });
+    }
+
+    const plan = String(req.body?.plan || '').toLowerCase();
+    if (plan !== 'monthly' && plan !== 'annual') {
+      return res
+        .status(400)
+        .json({ error: 'invalid_plan', detail: 'Informe plan = "monthly" | "annual".' });
+    }
+
+    const priceId = priceFor(plan);
+    if (!priceId) {
+      return res.status(500).json({
+        error: 'price_not_configured',
+        detail:
+          plan === 'monthly'
+            ? 'Defina STRIPE_PRICE_MONTHLY (ou STRIPE_MONTHLY_PRICE_ID) com um price_ LIVE.'
+            : 'Defina STRIPE_PRICE_ANNUAL (ou STRIPE_ANNUAL_PRICE_ID) com um price_ LIVE.',
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: `${FRONTEND_ORIGIN}/premium?success=1&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_ORIGIN}/premium?canceled=1`,
+      allow_promotion_codes: true,
+      billing_address_collection: 'auto',
+      // Você pode passar metadata/client_reference_id se quiser amarrar usuário
+      // client_reference_id: req.user?.id,
+      // metadata: { userId: req.user?.id }
+    });
+
+    return res.status(200).json({ url: session.url });
   } catch (err) {
-    console.error('Webhook signature error:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    console.error('stripe_checkout_error:', err);
+    return res
+      .status(500)
+      .json({ error: 'stripe_error', detail: err?.message || 'unknown_error' });
   }
 });
 
 /* =========================
-   JSON parser (depois do webhook)
+   GET /config (debug opcional)
    ========================= */
-app.use(express.json());
-
-/* =========================
-   ROTAS STRIPE (+ aliases)
-   ========================= */
-const stripeRouter = require('./routes/stripe');
-app.use('/api/stripe', stripeRouter);   // canônico
-app.use('/api/premium', stripeRouter);  // alias
-app.use('/premium', stripeRouter);      // alias
-
-/* =========================
-   START
-   ========================= */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Oh My Freud backend listening on ${PORT}`);
+router.get('/config', (_req, res) => {
+  res.json({
+    ok: true,
+    liveKey: STRIPE_SECRET_KEY.startsWith('sk_live_') || false,
+    frontendOrigin: FRONTEND_ORIGIN,
+    prices: {
+      monthly: Boolean(PRICE_MONTHLY),
+      annual: Boolean(PRICE_ANNUAL),
+    },
+  });
 });
+
+module.exports = router;
