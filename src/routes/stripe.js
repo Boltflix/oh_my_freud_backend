@@ -28,9 +28,9 @@ function getPriceFor(plan) {
 
 /**
  * POST /api/stripe/checkout
- * Aceita plan via body JSON ({"plan":"monthly"|"annual"}) OU via query (?plan=monthly)
- * Força parser JSON APENAS nesta rota para garantir que req.body exista.
- * Sempre responde em JSON (inclusive erros).
+ * Aceita plan via body JSON ({"plan":"monthly" | "annual"}) OU via query (?plan=monthly)
+ * Força parser JSON APENAS nessa rota.
+ * Sempre responde em JSON.
  */
 router.post("/checkout", express.json(), async (req, res) => {
   try {
@@ -41,9 +41,10 @@ router.post("/checkout", express.json(), async (req, res) => {
     const plan = (req.body && req.body.plan) || req.query.plan || null;
     const price = getPriceFor(plan);
     if (!price) {
-      return res
-        .status(400)
-        .json({ error: "invalid_plan", detail: "Use plan=monthly|annual via body JSON ou query string" });
+      return res.status(400).json({
+        error: "invalid_plan",
+        detail: "Use plan=monthly|annual via body JSON ou query string",
+      });
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -59,9 +60,10 @@ router.post("/checkout", express.json(), async (req, res) => {
     return res.json({ url: session.url });
   } catch (err) {
     console.error("checkout_error:", err);
-    return res
-      .status(500)
-      .json({ error: "checkout_failed", detail: String(err && err.message ? err.message : err) });
+    return res.status(500).json({
+      error: "checkout_failed",
+      detail: String(err && err.message ? err.message : err),
+    });
   }
 });
 
