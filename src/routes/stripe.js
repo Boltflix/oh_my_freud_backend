@@ -9,29 +9,35 @@ const stripe = SECRET ? new Stripe(SECRET) : null;
 
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://ohmyfreud.site";
 
-const PRICE_MONTHLY =
-  process.env.STRIPE_MONTHLY_PRICE_ID ||
-  process.env.STRIPE_PRICE_MONTHLY ||
-  process.env.STRIPE_PRICE_ID ||
-  "";
+// --- Helpers para DEBUG de qual env está sendo usado ---
+function pickFirst(nameList) {
+  for (const n of nameList) {
+    if (process.env[n]) return { value: process.env[n], source: n };
+  }
+  return { value: "", source: null };
+}
 
-const PRICE_ANNUAL =
-  process.env.STRIPE_ANNUAL_PRICE_ID ||
-  process.env.STRIPE_PRICE_ANNUAL ||
-  "";
+const MONTHLY_PICK = pickFirst([
+  "STRIPE_MONTHLY_PRICE_ID",
+  "STRIPE_PRICE_MONTHLY",
+  "STRIPE_PRICE_ID",
+]);
+const ANNUAL_PICK = pickFirst(["STRIPE_ANNUAL_PRICE_ID", "STRIPE_PRICE_ANNUAL"]);
 
-// Mapeia o plan -> price id
+const PRICE_MONTHLY = MONTHLY_PICK.value || "";
+const PRICE_ANNUAL = ANNUAL_PICK.value || "";
+
 function getPriceFor(plan) {
   if (!plan) return null;
   const p = String(plan).toLowerCase();
-  if (p === "monthly") return PRICE_MONTHLY;
-  if (p === "annual") return PRICE_ANNUAL;
+  if (p === "monthly") return PRICE_MONTHLY || null;
+  if (p === "annual") return PRICE_ANNUAL || null;
   return null;
 }
 
-// Extrai "plan" de query, body já parseado, body texto (JSON) ou body urlencoded
+// Extrai "plan" de query, body objeto, body string (JSON) ou urlencoded
 function extractPlan(req) {
-  if (req.query?.plan) return String(req.query.plan).toLowerCase();
+  if (req.query && req.query.plan) return String(req.query.plan).toLowerCase();
 
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
     if (req.body.plan) return String(req.body.plan).toLowerCase();
@@ -51,13 +57,48 @@ function extractPlan(req) {
       } catch (_) {}
     }
   }
-
   return null;
 }
 
-// POST /api/stripe/checkout
-// Usa express.text() para evitar que algum body-parser global gere 400 HTML.
-// Aceita: JSON {"plan":"monthly"|"annual"}, form urlencoded (plan=...), ou query (?plan=...).
+// --------- DEBUG: ver envs e price ids lidos pelo processo ---------
+router.get("/config", (req, res) => {
+  res.json({
+    ok: true,
+    hasStripeKey: !!SECRET,
+    monthly: { id: PRICE_MONTHLY || null, source: MONTHLY_PICK.source },
+    annual: { id: PRICE_ANNUAL || null, source: ANNUAL_PICK.source },
+    frontendOrigin: FRONTEND_ORIGIN,
+    node: process.version,
+    // envs originais (para checagem rápida)
+    env: {
+      STRIPE_MONTHLY_PRICE_ID: process.env.STRIPE_MONTHLY_PRICE_ID || null,
+      STRIPE_PRICE_MONTHLY: process.env.STRIPE_PRICE_MONTHLY || null,
+      STRIPE_PRICE_ID: process.env.STRIPE_PRICE_ID || null,
+      STRIPE_ANNUAL_PRICE_ID: process.env.STRIPE_ANNUAL_PRICE_ID || null,
+      STRIPE_PRICE_ANNUAL: process.env.STRIPE_PRICE_ANNUAL || null,
+    },
+  });
+});
+
+// --------- DEBUG: ecoar como o corpo foi recebido e que plan foi visto ---------
+router.post("/echo", express.text({ type: "*/*" }), (req, res) => {
+  const contentType = req.headers["content-type"] || null;
+  let bodyPreview = req.body;
+  if (typeof bodyPreview === "string" && bodyPreview.length > 500) {
+    bodyPreview = bodyPreview.slice(0, 500) + "...";
+  }
+  const plan = extractPlan(req);
+  res.json({
+    ok: true,
+    contentType,
+    bodyType: typeof req.body,
+    bodyPreview,
+    query: req.query || {},
+    plan,
+  });
+});
+
+// --------- CHECKOUT Stripe (aceita JSON, form e query) ---------
 router.post("/checkout", express.text({ type: "*/*" }), async (req, res) => {
   try {
     if (!stripe || !SECRET) {
@@ -69,7 +110,13 @@ router.post("/checkout", express.text({ type: "*/*" }), async (req, res) => {
     if (!price) {
       return res.status(400).json({
         error: "invalid_plan",
-        detail: "Use plan=monthly|annual no corpo (JSON/form) ou na query string",
+        detail:
+          "Use plan=monthly|annual no corpo (JSON/form) ou na query string. Conferir /api/stripe/config e /api/stripe/echo.",
+        received: {
+          plan,
+          hasMonthlyPrice: !!PRICE_MONTHLY,
+          hasAnnualPrice: !!PRICE_ANNUAL,
+        },
       });
     }
 
