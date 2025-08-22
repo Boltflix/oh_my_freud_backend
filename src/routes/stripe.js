@@ -7,10 +7,8 @@ const router = express.Router();
 const SECRET = process.env.STRIPE_SECRET_KEY || "";
 const stripe = SECRET ? new Stripe(SECRET) : null;
 
-// De onde o Stripe vai voltar após success/cancel
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://ohmyfreud.site";
 
-// IDs de preço (live)
 const PRICE_MONTHLY =
   process.env.STRIPE_MONTHLY_PRICE_ID ||
   process.env.STRIPE_PRICE_MONTHLY ||
@@ -32,7 +30,7 @@ function getPriceFor(plan) {
  * POST /api/stripe/checkout
  * Aceita plan via body JSON ({"plan":"monthly"|"annual"}) OU via query (?plan=monthly)
  * Força parser JSON APENAS nesta rota para garantir que req.body exista.
- * Sempre responde em JSON (inclusive erros), para facilitar o debug.
+ * Sempre responde em JSON (inclusive erros).
  */
 router.post("/checkout", express.json(), async (req, res) => {
   try {
