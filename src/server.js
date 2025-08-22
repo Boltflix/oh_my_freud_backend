@@ -1,23 +1,32 @@
 // src/server.js (CommonJS)
-// Endpoints principais:
-//  - GET  /api/health
-//  - POST /api/interpret         (alias: /interpret)
-//  - POST /api/stripe/checkout   (aliases: /api/premium e /premium)  [já existentes]
-//  - POST /api/stripe/webhook    (mantém express.raw)
-//  - POST /api/wellness/sleep-hygiene
-//  - POST /api/wellness/free-association
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
 const interpretRouter = require('./routes/interpret');
-const { router: stripeRouter, createCheckout } = require('./routes/stripe'); // já existente no seu projeto
-const wellnessRouter = require('./routes/wellness'); // NOVO
+const { router: stripeRouter, createCheckout } = require('./routes/stripe');
+
+// Carrega wellness com proteção (evita crash se export vier errado)
+let wellnessRouter = null;
+try {
+  // wellness.js deve exportar **module.exports = router**
+  // Se exportar objeto { router }, a checagem abaixo evita quebrar o app.
+  const mod = require('./routes/wellness');
+  wellnessRouter =
+    typeof mod === 'function' && typeof mod.use === 'function'
+      ? mod
+      : (mod && mod.router && typeof mod.router.use === 'function' ? mod.router : null);
+  if (!wellnessRouter) {
+    console.warn('[WARN] wellness router not loaded (export mismatch). App will boot without /api/wellness.');
+  }
+} catch (e) {
+  console.warn('[WARN] wellness router load error:', e.message);
+}
 
 const app = express();
 
-// --------- CORS ANTES do express.json() ----------
+// ---------- CORS ANTES do express.json() ----------
 const allowed = new Set([
   'https://ohmyfreud.site',
   'https://www.ohmyfreud.site',
@@ -33,10 +42,10 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// --------- Webhook Stripe com raw ----------
+// ---------- Webhook Stripe com raw ----------
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 
-// --------- Demais rotas com JSON ----------
+// ---------- Demais rotas com JSON ----------
 app.use(express.json());
 
 // Health
@@ -48,13 +57,15 @@ app.get('/api/health', (req, res) => {
 app.use('/api/interpret', interpretRouter);
 app.use('/interpret', interpretRouter); // alias
 
-// Stripe (existente)
+// Stripe
 app.use('/api/stripe', stripeRouter);
-app.post('/api/premium', (req, res) => createCheckout(req, res)); // alias mantido p/ Stripe
-app.post('/premium', (req, res) => createCheckout(req, res));     // alias mantido p/ Stripe
+app.post('/api/premium', (req, res) => createCheckout(req, res));
+app.post('/premium', (req, res) => createCheckout(req, res));
 
-// Wellness/Exercícios (NOVO)
-app.use('/api/wellness', wellnessRouter);
+// Wellness (só registra se carregou ok)
+if (wellnessRouter) {
+  app.use('/api/wellness', wellnessRouter);
+}
 
 // Erro genérico
 app.use((err, req, res, next) => {
@@ -68,6 +79,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
-
-
 
