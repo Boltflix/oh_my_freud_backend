@@ -1,4 +1,5 @@
-// src/server.js (CommonJS)
+// src/server.js (CommonJS) — rollback sem /api/wellness
+// Start: node src/server.js
 
 require('dotenv').config();
 const express = require('express');
@@ -7,26 +8,9 @@ const cors = require('cors');
 const interpretRouter = require('./routes/interpret');
 const { router: stripeRouter, createCheckout } = require('./routes/stripe');
 
-// Carrega wellness com proteção (evita crash se export vier errado)
-let wellnessRouter = null;
-try {
-  // wellness.js deve exportar **module.exports = router**
-  // Se exportar objeto { router }, a checagem abaixo evita quebrar o app.
-  const mod = require('./routes/wellness');
-  wellnessRouter =
-    typeof mod === 'function' && typeof mod.use === 'function'
-      ? mod
-      : (mod && mod.router && typeof mod.router.use === 'function' ? mod.router : null);
-  if (!wellnessRouter) {
-    console.warn('[WARN] wellness router not loaded (export mismatch). App will boot without /api/wellness.');
-  }
-} catch (e) {
-  console.warn('[WARN] wellness router load error:', e.message);
-}
-
 const app = express();
 
-// ---------- CORS ANTES do express.json() ----------
+// ---- CORS ANTES do express.json() ----
 const allowed = new Set([
   'https://ohmyfreud.site',
   'https://www.ohmyfreud.site',
@@ -42,32 +26,27 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// ---------- Webhook Stripe com raw ----------
+// ---- Stripe webhook (raw) ANTES do json ----
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 
-// ---------- Demais rotas com JSON ----------
+// ---- Demais rotas em JSON ----
 app.use(express.json());
 
-// Health
+// ---- Health ----
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'oh-my-freud-backend', ts: new Date().toISOString() });
 });
 
-// Interpret
+// ---- Interpret ----
 app.use('/api/interpret', interpretRouter);
 app.use('/interpret', interpretRouter); // alias
 
-// Stripe
+// ---- Stripe ----
 app.use('/api/stripe', stripeRouter);
-app.post('/api/premium', (req, res) => createCheckout(req, res));
-app.post('/premium', (req, res) => createCheckout(req, res));
+app.post('/api/premium', (req, res) => createCheckout(req, res)); // alias p/ Stripe
+app.post('/premium', (req, res) => createCheckout(req, res));     // alias p/ Stripe
 
-// Wellness (só registra se carregou ok)
-if (wellnessRouter) {
-  app.use('/api/wellness', wellnessRouter);
-}
-
-// Erro genérico
+// ---- Erro genérico ----
 app.use((err, req, res, next) => {
   console.error('[UNHANDLED]', err);
   res.status(500).json({ error: 'internal_error', detail: err?.message || 'unknown' });
@@ -79,4 +58,3 @@ if (require.main === module) {
 }
 
 module.exports = app;
-
