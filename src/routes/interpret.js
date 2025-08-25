@@ -6,14 +6,53 @@ const OpenAI = require("openai");
 
 const OPENAI_KEY =
   process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || "";
-const MODEL = process.env.OPENAI_MODEL || "gpt-5o-mini";
-
 const openai = OPENAI_KEY ? new OpenAI({ apiKey: OPENAI_KEY }) : null;
 
-// util: idioma em 2 letras
+/**
+ * Modelo(s) preferidos:
+ * - 1º: variável de ambiente OPENAI_MODEL (se existir)
+ * - 2º: gpt-5o-mini (mais barato/eficiente)
+ * - 3º: gpt-4o-mini (fallback de custo baixo)
+ */
+const PREFERRED_MODELS = [
+  process.env.OPENAI_MODEL,
+  "gpt-5o-mini",
+  "gpt-4o-mini",
+].filter(Boolean);
+
+// idioma (2 letras)
 function pickLang(input) {
   if (!input) return "pt";
   return String(input).toLowerCase().split("-")[0].slice(0, 2) || "pt";
+}
+
+// Tenta chamar a API testando a lista de modelos preferidos
+async function createChatJSON(messages) {
+  let lastErr = null;
+
+  for (const model of PREFERRED_MODELS) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model,
+        temperature: 0.7,
+        response_format: { type: "json_object" },
+        messages,
+      });
+      return { completion, modelUsed: model };
+    } catch (err) {
+      lastErr = err;
+      // se o erro for de modelo inexistente/indisponível, tenta o próximo
+      const msg = String(err?.message || err);
+      const code = err?.code || err?.status || "";
+      const isModelIssue =
+        msg.includes("model_not_found") ||
+        msg.includes("invalid_request_error") ||
+        code === 404;
+      if (!isModelIssue) break; // erro diferente de modelo — não adianta tentar os próximos
+    }
+  }
+
+  throw lastErr || new Error("openai_call_failed");
 }
 
 // POST /api/interpret
@@ -41,40 +80,27 @@ Escreva **no idioma**: ${lang}.
 Responda **apenas JSON** com o seguinte formato:
 
 {
-  "summary": string (máx ~2-3 frases, direto e poético),
-  "fullText": string (análise psicanalítica mais longa, ~10-15 linhas),
-  "symbols": [{"symbol": string, "meaning": string}, ... 3 a 6 itens],
-  "themes": [string, ... 3 a 5 itens],
-  "associationPrompts": [string, ... 3 a 5 perguntas para associação livre],
-  "cautionNote": string (nota ética: é um guia educativo, não substitui terapia)
+  "summary": string,
+  "fullText": string,
+  "symbols": [{"symbol": string, "meaning": string}],
+  "themes": [string],
+  "associationPrompts": [string],
+  "cautionNote": string
 }
 
-Não inclua texto fora do JSON. Nada de markdown.
-`;
+Não inclua nada fora do JSON. Sem markdown.
+`.trim();
 
-    const user = {
-      dream,
-    };
+    const user = { dream };
 
-    // Responses API com obrigatoriedade de JSON:
-    const completion = await openai.chat.completions.create({
-      model: MODEL,
-      temperature: 0.7,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: sys },
-        {
-          role: "user",
-          content: JSON.stringify(user),
-        },
-      ],
-    });
+    const { completion, modelUsed } = await createChatJSON([
+      { role: "system", content: sys },
+      { role: "user", content: JSON.stringify(user) },
+    ]);
 
     const text = completion.choices?.[0]?.message?.content?.trim();
     if (!text) {
-      return res.status(502).json({
-        error: "empty_openai_response",
-      });
+      return res.status(502).json({ error: "empty_openai_response" });
     }
 
     let parsed;
@@ -90,6 +116,7 @@ Não inclua texto fora do JSON. Nada de markdown.
     return res.json({
       ok: true,
       interpretation: parsed,
+      modelUsed,
     });
   } catch (err) {
     console.error("interpret_error:", err);
