@@ -1,0 +1,35 @@
+// src/routes/insights.js
+const express = require("express");
+const router = express.Router();
+
+function pickDaily(list) {
+  const day = new Date().toISOString().slice(0, 10);
+  const idx =
+    day.split("-").join("").split("").reduce((a, b) => a + b.charCodeAt(0), 0) %
+    list.length;
+  return list[idx];
+}
+
+router.get("/sleep-tip", (req, res) => {
+  const tips = [
+    { tip: "Evite telas 60 minutos antes de dormir; a luz azul adia a melatonina." },
+    { tip: "Quarto fresco (18–21°C) favorece a queda de temperatura corporal." },
+    { tip: "Rotina constante: horários de deitar/levantar semelhantes inclusive no fim de semana." },
+    { tip: "Cafeína: limite após 14h. Nicotina e álcool atrapalham a arquitetura do sono." },
+    { tip: "Exposição à luz solar pela manhã regulariza o ritmo circadiano." },
+  ];
+  res.json(pickDaily(tips));
+});
+
+router.get("/dream-symbol", (req, res) => {
+  const symbols = [
+    { symbol: "Água", meaning: "Emoção profunda; acesso ao conteúdo latente." },
+    { symbol: "Casa", meaning: "Estrutura do self; cômodos como aspectos do eu." },
+    { symbol: "Porta", meaning: "Limiar psíquico; passagem entre conteúdos." },
+    { symbol: "Escada", meaning: "Movimento entre níveis psíquicos; ascensão/descida." },
+    { symbol: "Chave", meaning: "Acesso ao reprimido; solução simbólica." },
+  ];
+  res.json(pickDaily(symbols));
+});
+
+module.exports = router;
